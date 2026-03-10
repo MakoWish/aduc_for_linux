@@ -15,3 +15,5 @@ Migrating away from Windows while still working in a Microsoft environment has p
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/install.sh)
 ```
+
+If running as root, you will be prompted to install for all users, or just for yourself. If not running as root, the install will be for your profile only.
