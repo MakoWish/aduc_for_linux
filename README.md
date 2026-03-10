@@ -2,4 +2,4 @@
 
 Python implementation of Microsoft's Active Directory Users and Computers
 
-~[Active Directory for Linux](image.png)
+![Active Directory for Linux](image.png)
