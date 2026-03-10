@@ -61,7 +61,7 @@ For normal use, prefer running through the installed virtual environment (launch
 
 ## Configuration
 
-The app stores settings in:
+The app stores some preference settings in:
 
 - `~/.config/aduc-linux/settings.json`
 
@@ -101,4 +101,4 @@ Potential next improvements:
 
 ## Disclaimer
 
-This is an independent project and is not an official Microsoft product.
+This is an independent project and is not an official Microsoft product. Although all efforts are made to ensure this project works without issue, use at your own risk.
