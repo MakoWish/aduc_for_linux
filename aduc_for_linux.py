@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QMenu,
+    QInputDialog,
     QDialog,
     QDialogButtonBox,
     QAbstractItemView,
@@ -987,6 +988,42 @@ class LdapManager:
         if not ok:
             raise ValueError(str(self.conn.result))
 
+    def delete_object(self, dn: str) -> None:
+        if not self.conn:
+            return
+
+        ok = self.conn.delete(dn)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
+    def rename_object(self, dn: str, new_name: str) -> None:
+        if not self.conn:
+            return
+
+        parts = [p.strip() for p in dn.split(",") if p.strip()]
+        if not parts or "=" not in parts[0]:
+            raise ValueError("Invalid distinguished name")
+
+        rdn_type, _ = parts[0].split("=", 1)
+        new_rdn = f"{rdn_type}={new_name}"
+        ok = self.conn.modify_dn(dn, new_rdn)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
+    def create_organizational_unit(self, parent_dn: str, name: str, description: str = "") -> str:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        ou_dn = f"OU={name},{parent_dn}"
+        attributes: dict[str, Any] = {"objectClass": ["top", "organizationalUnit"], "ou": name}
+        if description:
+            attributes["description"] = description
+
+        ok = self.conn.add(ou_dn, attributes=attributes)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+        return ou_dn
+
     def search_directory_objects(
         self,
         base_dn: str,
@@ -1660,6 +1697,7 @@ class MainWindow(QMainWindow):
         self.main_table_column_widths: list[int] = []
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
+        self.show_advanced_features = True
         self.current_dn: Optional[str] = None
         self.load_settings()
 
@@ -1688,6 +1726,7 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
         self.table.group_membership_drop.connect(self.on_group_membership_drop)
+        self.table.itemSelectionChanged.connect(self.update_status_bar)
 
         self.apply_saved_main_table_widths()
 
@@ -1724,6 +1763,51 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        action_menu = self.menuBar().addMenu("Action")
+
+        self.find_action = QAction("Find...", self)
+        self.find_action.setShortcut("Ctrl+F")
+        self.find_action.triggered.connect(self.find_in_current)
+        action_menu.addAction(self.find_action)
+
+        self.properties_action = QAction("Properties", self)
+        self.properties_action.setShortcut("Alt+Return")
+        self.properties_action.triggered.connect(self.open_selected_properties)
+        action_menu.addAction(self.properties_action)
+
+        self.rename_action = QAction("Rename", self)
+        self.rename_action.setShortcut("F2")
+        self.rename_action.triggered.connect(self.rename_selected_object)
+        action_menu.addAction(self.rename_action)
+
+        self.delete_action = QAction("Delete", self)
+        self.delete_action.setShortcut("Delete")
+        self.delete_action.triggered.connect(self.delete_selected_objects)
+        action_menu.addAction(self.delete_action)
+
+        action_menu.addSeparator()
+        self.new_ou_action = QAction("New Organizational Unit...", self)
+        self.new_ou_action.triggered.connect(self.create_ou_in_current)
+        action_menu.addAction(self.new_ou_action)
+
+        view_menu = self.menuBar().addMenu("View")
+        refresh_action.setShortcut("F5")
+        view_menu.addAction(refresh_action)
+
+        self.advanced_features_action = QAction("Advanced Features", self)
+        self.advanced_features_action.setCheckable(True)
+        self.advanced_features_action.setChecked(self.show_advanced_features)
+        self.advanced_features_action.triggered.connect(self.toggle_advanced_features)
+        view_menu.addAction(self.advanced_features_action)
+
+        help_menu = self.menuBar().addMenu("Help")
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
+        self.refresh_advanced_features_ui()
+        self.update_status_bar()
+
         if self.auto_connect and self.saved_host:
             QTimer.singleShot(0, self.auto_connect_if_configured)
 
@@ -1732,6 +1816,31 @@ class MainWindow(QMainWindow):
 
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
+
+    def show_about_dialog(self) -> None:
+        QMessageBox.information(
+            self,
+            "About ADUC for Linux",
+            "ADUC for Linux\n\n"
+            "A Linux-friendly Active Directory Users and Computers-style management console.",
+        )
+
+    def update_status_bar(self) -> None:
+        selected_rows = len(self.table.selectionModel().selectedRows()) if self.table.selectionModel() else 0
+        object_count = self.table.rowCount()
+        location = self.current_dn or "No container selected"
+        self.statusBar().showMessage(
+            f"Objects: {object_count} | Selected: {selected_rows} | Location: {location}"
+        )
+
+    def refresh_advanced_features_ui(self) -> None:
+        # ADUC typically exposes additional DN/object details in advanced mode.
+        self.table.setColumnHidden(3, not self.show_advanced_features)
+
+    def toggle_advanced_features(self, checked: bool) -> None:
+        self.show_advanced_features = checked
+        self.refresh_advanced_features_ui()
+        self.update_status_bar()
 
     @contextmanager
     def busy_cursor(self):
@@ -1774,6 +1883,7 @@ class MainWindow(QMainWindow):
         self.saved_host = str(data.get("host", ""))
         self.saved_port = int(data.get("port", 636))
         self.auto_connect = bool(data.get("auto_connect", False))
+        self.show_advanced_features = bool(data.get("show_advanced_features", True))
 
         widths = data.get("main_table_column_widths", [])
         if isinstance(widths, list):
@@ -1810,6 +1920,7 @@ class MainWindow(QMainWindow):
             "host": self.saved_host,
             "port": self.saved_port,
             "auto_connect": self.auto_connect,
+            "show_advanced_features": self.show_advanced_features,
             "main_table_column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
             "window_width": self.width(),
             "window_height": self.height(),
@@ -1971,6 +2082,7 @@ class MainWindow(QMainWindow):
 
         for index in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(index).setExpanded(True)
+        self.update_status_bar()
 
     def load_tree_children(self, item: QTreeWidgetItem) -> None:
         data = item.data(0, Qt.UserRole) or {}
@@ -2030,6 +2142,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, type_item)
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
+        self.update_status_bar()
 
     def populate_search_results(self, results: list[LdapObject]) -> None:
         self.table.setRowCount(len(results))
@@ -2067,6 +2180,7 @@ class MainWindow(QMainWindow):
 
         self.table.clearContents()
         self.populate_search_results(results)
+        self.update_status_bar()
 
     def open_properties(self, obj: LdapObject) -> None:
         try:
@@ -2113,6 +2227,96 @@ class MainWindow(QMainWindow):
     def copy_text_to_clipboard(self, text: str) -> None:
         QApplication.clipboard().setText(text)
 
+    def selected_table_objects(self) -> list[LdapObject]:
+        selected_rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
+        selected_objects: list[LdapObject] = []
+        for selected_row in selected_rows:
+            selected_name_item = self.table.item(selected_row, 0)
+            if not selected_name_item:
+                continue
+            selected_obj = selected_name_item.data(Qt.UserRole)
+            if isinstance(selected_obj, LdapObject):
+                selected_objects.append(selected_obj)
+        return selected_objects
+
+    def open_selected_properties(self) -> None:
+        selected_objects = self.selected_table_objects()
+        if len(selected_objects) == 1:
+            self.open_properties(selected_objects[0])
+
+    def find_in_current(self) -> None:
+        if not self.current_dn:
+            return
+        dlg = SearchDialog(self.current_dn, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.run_search(self.current_dn, dlg.term(), search_mode=dlg.search_mode())
+
+    def rename_selected_object(self) -> None:
+        selected_objects = self.selected_table_objects()
+        if len(selected_objects) != 1:
+            return
+
+        obj = selected_objects[0]
+        new_name, ok = QInputDialog.getText(self, "Rename", "New name:", text=obj.name)
+        new_name = new_name.strip()
+        if not ok or not new_name or new_name == obj.name:
+            return
+
+        try:
+            self.ldap.rename_object(obj.dn, new_name)
+        except Exception as e:
+            self.show_error("Rename failed", str(e))
+            return
+
+        self.refresh_current()
+
+    def delete_selected_objects(self) -> None:
+        selected_objects = self.selected_table_objects()
+        if not selected_objects:
+            return
+
+        names = "\n".join(f"- {obj.name}" for obj in selected_objects[:10])
+        if len(selected_objects) > 10:
+            names += f"\n- ... and {len(selected_objects) - 10} more"
+
+        reply = QMessageBox.question(
+            self,
+            "Delete objects",
+            f"Delete {len(selected_objects)} object(s)?\n\n{names}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        failures: list[str] = []
+        for obj in selected_objects:
+            try:
+                self.ldap.delete_object(obj.dn)
+            except Exception as e:
+                failures.append(f"{obj.dn}: {e}")
+
+        if failures:
+            self.show_error("Delete failed", "\n".join(failures))
+        self.refresh_current()
+
+    def create_ou_in_current(self) -> None:
+        if not self.current_dn:
+            return
+
+        name, ok = QInputDialog.getText(self, "New Organizational Unit", "Name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+
+        try:
+            self.ldap.create_organizational_unit(self.current_dn, name)
+        except Exception as e:
+            self.show_error("Create OU failed", str(e))
+            return
+
+        self.refresh_current()
+
     def ldap_object_from_tree_item(self, item: QTreeWidgetItem) -> Optional[LdapObject]:
         if not item:
             return None
@@ -2145,6 +2349,7 @@ class MainWindow(QMainWindow):
         properties_action = menu.addAction("Properties")
         refresh_action = menu.addAction("Refresh")
         search_action = menu.addAction("Find...")
+        create_ou_action = menu.addAction("New Organizational Unit...") if obj.is_container else None
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
         expand_action = None
@@ -2170,6 +2375,16 @@ class MainWindow(QMainWindow):
             dlg = SearchDialog(obj.dn, self)
             if dlg.exec() == QDialog.Accepted:
                 self.run_search(obj.dn, dlg.term(), search_mode=dlg.search_mode())
+        elif create_ou_action is not None and chosen == create_ou_action:
+            name, ok = QInputDialog.getText(self, "New Organizational Unit", "Name:")
+            name = name.strip()
+            if ok and name:
+                try:
+                    self.ldap.create_organizational_unit(obj.dn, name)
+                except Exception as e:
+                    self.show_error("Create OU failed", str(e))
+                    return
+                self.refresh_current()
         elif chosen == copy_dn_action:
             self.copy_text_to_clipboard(obj.dn)
         elif expand_action is not None and chosen == expand_action:
@@ -2207,6 +2422,9 @@ class MainWindow(QMainWindow):
 
         properties_action = menu.addAction("Properties")
         properties_action.setEnabled(is_single)
+        rename_action = menu.addAction("Rename")
+        rename_action.setEnabled(is_single)
+        delete_action = menu.addAction("Delete")
 
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
@@ -2246,6 +2464,10 @@ class MainWindow(QMainWindow):
 
         if chosen == properties_action:
             self.open_properties(obj)
+        elif chosen == rename_action:
+            self.rename_selected_object()
+        elif chosen == delete_action:
+            self.delete_selected_objects()
         elif chosen == copy_dn_action:
             dns = [selected_obj.dn for selected_obj in selected_objects]
             self.copy_text_to_clipboard("\n".join(dns))
