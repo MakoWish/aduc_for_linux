@@ -55,17 +55,20 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 CONTAINER_CLASSES = {
     "domain",
     "container",
-    "organizationalUnit",
-    "builtinDomain",
+    "organizationalunit",
+    "builtindomain",
 }
 
-USER_CLASSES = {"user", "person", "organizationalPerson"}
+USER_CLASSES = {"user", "person", "organizationalperson"}
 GROUP_CLASSES = {"group"}
 COMPUTER_CLASSES = {"computer"}
 
 
-def build_aduc_ou_icon(size: int = 16) -> QIcon:
-    """Create a Windows ADUC-style OU icon (yellow folder + blue object card)."""
+def build_aduc_ou_icon(has_child_ou: bool, size: int = 16) -> QIcon:
+    """Create a Windows ADUC-style OU icon.
+
+    OUs with child OUs receive a stacked card treatment; leaf OUs use a single card.
+    """
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
 
@@ -76,6 +79,7 @@ def build_aduc_ou_icon(size: int = 16) -> QIcon:
 
     folder_tab_rect = (1 * scale, 2 * scale, 6 * scale, 3 * scale)
     folder_body_rect = (1 * scale, 4 * scale, 14 * scale, 10 * scale)
+    back_card_rect = (7 * scale, 6 * scale, 6 * scale, 6 * scale)
     card_rect = (8 * scale, 7 * scale, 7 * scale, 7 * scale)
 
     folder_border = QColor("#9A6900")
@@ -91,6 +95,11 @@ def build_aduc_ou_icon(size: int = 16) -> QIcon:
     painter.setBrush(QBrush(folder_fill))
     painter.drawRect(*folder_body_rect)
 
+    if has_child_ou:
+        painter.setPen(QPen(card_border, 1))
+        painter.setBrush(QBrush(QColor("#D9E8FF")))
+        painter.drawRect(*back_card_rect)
+
     painter.setPen(QPen(card_border, 1))
     painter.setBrush(QBrush(card_fill))
     painter.drawRect(*card_rect)
@@ -105,22 +114,101 @@ def build_aduc_ou_icon(size: int = 16) -> QIcon:
     return QIcon(pixmap)
 
 
+def build_aduc_user_icon(size: int = 16) -> QIcon:
+    """Create an ADUC-like user icon (person over blue account card)."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    scale = max(1, size // 16)
+
+    card_rect = (6 * scale, 6 * scale, 9 * scale, 8 * scale)
+    painter.setPen(QPen(QColor("#2E5590"), 1))
+    painter.setBrush(QBrush(QColor("#C8DCFF")))
+    painter.drawRect(*card_rect)
+
+    painter.setPen(QPen(QColor("#2E5590"), 1))
+    for i in range(3):
+        y = card_rect[1] + (2 + 2 * i) * scale
+        painter.drawLine(card_rect[0] + 1 * scale, y, card_rect[0] + card_rect[2] - 2 * scale, y)
+
+    painter.setPen(QPen(QColor("#7A4F1A"), 1))
+    painter.setBrush(QBrush(QColor("#F6D1A2")))
+    painter.drawEllipse(1 * scale, 2 * scale, 6 * scale, 6 * scale)
+
+    painter.setPen(QPen(QColor("#315C9C"), 1))
+    painter.setBrush(QBrush(QColor("#4F83C5")))
+    painter.drawRoundedRect(1 * scale, 8 * scale, 7 * scale, 6 * scale, 1, 1)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def build_aduc_group_icon(size: int = 16) -> QIcon:
+    """Create an ADUC-like group icon (two user heads over card)."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    scale = max(1, size // 16)
+    painter.setPen(QPen(QColor("#2E5590"), 1))
+    painter.setBrush(QBrush(QColor("#C8DCFF")))
+    painter.drawRect(6 * scale, 6 * scale, 9 * scale, 8 * scale)
+
+    painter.setPen(QPen(QColor("#845A21"), 1))
+    painter.setBrush(QBrush(QColor("#F2C996")))
+    painter.drawEllipse(1 * scale, 3 * scale, 4 * scale, 4 * scale)
+    painter.drawEllipse(4 * scale, 2 * scale, 4 * scale, 4 * scale)
+
+    painter.setPen(QPen(QColor("#2E6FAE"), 1))
+    painter.setBrush(QBrush(QColor("#5A9AD6")))
+    painter.drawRoundedRect(1 * scale, 8 * scale, 4 * scale, 5 * scale, 1, 1)
+    painter.drawRoundedRect(4 * scale, 7 * scale, 4 * scale, 6 * scale, 1, 1)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def build_aduc_computer_icon(size: int = 16) -> QIcon:
+    """Create an ADUC-like computer icon (CRT monitor + base)."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, False)
+
+    scale = max(1, size // 16)
+    painter.setPen(QPen(QColor("#4A4A4A"), 1))
+    painter.setBrush(QBrush(QColor("#DCE3EC")))
+    painter.drawRect(2 * scale, 2 * scale, 12 * scale, 9 * scale)
+
+    painter.setPen(QPen(QColor("#2B577E"), 1))
+    painter.setBrush(QBrush(QColor("#8EC1F0")))
+    painter.drawRect(3 * scale, 3 * scale, 10 * scale, 7 * scale)
+
+    painter.setPen(QPen(QColor("#6A6A6A"), 1))
+    painter.setBrush(QBrush(QColor("#A9B3BF")))
+    painter.drawRect(6 * scale, 11 * scale, 4 * scale, 2 * scale)
+    painter.drawRect(4 * scale, 13 * scale, 8 * scale, 2 * scale)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
     if obj.object_type == "Organizational Unit":
-        return build_aduc_ou_icon()
+        return build_aduc_ou_icon(has_child_ou=obj.has_child_ou)
     if obj.object_type in {"Container", "Domain"}:
         icon = QIcon.fromTheme("folder")
         return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
     if obj.object_type == "User":
-        icon = QIcon.fromTheme("user-identity")
-        base_icon = icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+        base_icon = build_aduc_user_icon()
         return add_user_state_overlays(base_icon, obj)
     if obj.object_type == "Group":
-        icon = QIcon.fromTheme("system-users")
-        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
+        return build_aduc_group_icon()
     if obj.object_type == "Computer":
-        icon = QIcon.fromTheme("computer")
-        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_ComputerIcon)
+        return build_aduc_computer_icon()
     icon = QIcon.fromTheme("text-x-generic")
     return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
 
@@ -165,6 +253,7 @@ class LdapObject:
     description: str = ""
     user_disabled: bool = False
     user_locked: bool = False
+    has_child_ou: bool = False
 
     @property
     def is_container(self) -> bool:
@@ -179,7 +268,7 @@ class LdapObject:
             return "Group"
         if any(cls in classes for cls in USER_CLASSES) and "computer" not in classes:
             return "User"
-        if "organizationalUnit" in classes:
+        if "organizationalunit" in classes:
             return "Organizational Unit"
         if "container" in classes:
             return "Container"
@@ -264,7 +353,7 @@ class LdapManager:
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
-            object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+            object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             if "computer" in object_classes and "dNSHostName" in entry:
                 try:
                     dns_name = str(entry.dNSHostName)
@@ -296,6 +385,7 @@ class LdapManager:
             )
 
         results.sort(key=lambda x: (not x.is_container, x.name.lower()))
+        self._populate_ou_child_status(results)
         return results
 
     def get_object_attributes(self, dn: str) -> dict[str, list[str]]:
@@ -365,7 +455,7 @@ class LdapManager:
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
-            object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+            object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             if "computer" in object_classes and "dNSHostName" in entry:
                 try:
                     dns_name = str(entry.dNSHostName)
@@ -395,7 +485,28 @@ class LdapManager:
             )
 
         results.sort(key=lambda x: (not x.is_container, x.name.lower()))
+        self._populate_ou_child_status(results)
         return results
+
+    def _populate_ou_child_status(self, objects: list[LdapObject]) -> None:
+        if not self.conn:
+            return
+
+        for obj in objects:
+            if "organizationalunit" not in obj.object_classes:
+                continue
+
+            try:
+                self.conn.search(
+                    search_base=obj.dn,
+                    search_filter="(objectClass=organizationalUnit)",
+                    search_scope=LEVEL,
+                    attributes=["distinguishedName"],
+                    size_limit=1,
+                )
+                obj.has_child_ou = bool(self.conn.entries)
+            except Exception:
+                obj.has_child_ou = False
 
     def get_single_attribute(self, dn: str, attr_name: str) -> Optional[str]:
         if not self.conn:
@@ -532,7 +643,7 @@ class LdapManager:
             return None
 
         entry = self.conn.entries[0]
-        object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+        object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
         if "computer" in object_classes and "dNSHostName" in entry:
             try:
                 dns_name = str(entry.dNSHostName)
@@ -682,7 +793,7 @@ class LdapManager:
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
-            object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+            object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             if "computer" in object_classes and "dNSHostName" in entry:
                 try:
                     dns_name = str(entry.dNSHostName)
