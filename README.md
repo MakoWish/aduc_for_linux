@@ -11,13 +11,16 @@ Migrating away from Windows while still working in a Microsoft environment has p
 
 ## Sample Desktop Application Launcher
 
-`~/.local/share/applications/aduc_for_linux.desktop`
-```
-[Desktop Entry]
-Name=ADUC for Linux
-Exec=/path/to/aduc_for_linux.py
-Icon=/path/to/app_icon.png
-Type=Application
-Terminal=false
-Categories=Utility;
+```bash
+sudo wget 
+#!/bin/bash
+bash -c "cat > ~/.local/share/applications/aduc_for_linux.desktop" <<- EOF
+	[Desktop Entry]
+	Name=ADUC for Linux
+	Exec=/path/to/aduc_for_linux.py
+	Icon=/path/to/app_icon.png
+	Type=Application
+	Terminal=false
+	Categories=Utility;
+EOF
 ```
