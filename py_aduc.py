@@ -1302,6 +1302,7 @@ class MainWindow(QMainWindow):
         self.saved_host = ""
         self.saved_port = 636
         self.auto_connect = False
+        self.main_table_column_widths: list[int] = []
         self.current_dn: Optional[str] = None
         self.load_settings()
 
@@ -1322,13 +1323,12 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSortingEnabled(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
+
+        self.apply_saved_main_table_widths()
 
         splitter = QSplitter()
         splitter.addWidget(self.tree)
@@ -1413,6 +1413,16 @@ class MainWindow(QMainWindow):
         self.saved_port = int(data.get("port", 636))
         self.auto_connect = bool(data.get("auto_connect", False))
 
+        widths = data.get("main_table_column_widths", [])
+        if isinstance(widths, list):
+            parsed_widths: list[int] = []
+            for width in widths:
+                try:
+                    parsed_widths.append(int(width))
+                except (TypeError, ValueError):
+                    continue
+            self.main_table_column_widths = parsed_widths
+
     def save_settings(self) -> None:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         data = {
@@ -1420,9 +1430,23 @@ class MainWindow(QMainWindow):
             "host": self.saved_host,
             "port": self.saved_port,
             "auto_connect": self.auto_connect,
+            "main_table_column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+    def apply_saved_main_table_widths(self) -> None:
+        if not self.main_table_column_widths:
+            return
+
+        for index, width in enumerate(self.main_table_column_widths):
+            if index >= self.table.columnCount() or width <= 0:
+                continue
+            self.table.setColumnWidth(index, width)
+
+    def closeEvent(self, event) -> None:
+        self.save_settings()
+        super().closeEvent(event)
 
     def auto_connect_if_configured(self) -> None:
         if self.auth_mode != "kerberos":
