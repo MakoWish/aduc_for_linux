@@ -1651,7 +1651,7 @@ class MainWindow(QMainWindow):
 
         properties_action = menu.addAction("Properties")
         refresh_action = menu.addAction("Refresh")
-        search_action = menu.addAction("Search...")
+        search_action = menu.addAction("Find...")
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
         expand_action = None
