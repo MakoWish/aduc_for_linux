@@ -1864,8 +1864,6 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
 
-        self.table.resizeColumnToContents(0)
-
     def populate_search_results(self, results: list[LdapObject]) -> None:
         self.table.setRowCount(len(results))
 
