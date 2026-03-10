@@ -930,6 +930,17 @@ class LdapManager:
         if not ok:
             raise ValueError(str(self.conn.result))
 
+    def replace_object_attribute_values(self, dn: str, attr_name: str, values: list[str]) -> None:
+        if not self.conn:
+            return
+
+        ok = self.conn.modify(
+            dn,
+            {attr_name: [(MODIFY_REPLACE, values)]},
+        )
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
     def get_object_summary(self, dn: str) -> Optional[LdapObject]:
         if not self.conn:
             return None
@@ -1394,6 +1405,19 @@ class PropertiesDialog(QDialog):
 
 
 class UserPropertiesDialog(QDialog):
+    NON_EDITABLE_ATTRIBUTES = {
+        "distinguishedName",
+        "objectClass",
+        "objectGUID",
+        "objectSid",
+        "whenCreated",
+        "whenChanged",
+        "uSNCreated",
+        "uSNChanged",
+        "memberOf",
+        "member",
+    }
+
     UAC_FLAGS: list[tuple[str, int]] = [
         ("Account is disabled", 0x0002),
         ("Account is locked out", 0x0010),
@@ -1422,6 +1446,13 @@ class UserPropertiesDialog(QDialog):
         self.current_uac_value = 0
         self.initially_locked = False
         self.uac_checkboxes: list[tuple[QCheckBox, int]] = []
+        self.original_attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
+        self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
+        self.selected_attribute: Optional[str] = None
+        self.loading_attribute_text = False
+        self.attribute_name_label: Optional[QLabel] = None
+        self.attribute_value_edit: Optional[QTextEdit] = None
+        self.apply_button: Optional[QPushButton] = None
 
         tabs = QTabWidget()
         tabs.addTab(self.build_general_tab(obj, attrs), "General")
@@ -1437,11 +1468,13 @@ class UserPropertiesDialog(QDialog):
         buttons.rejected.connect(self.reject)
         apply_button = buttons.button(QDialogButtonBox.Apply)
         if apply_button:
+            self.apply_button = apply_button
             apply_button.clicked.connect(self.apply_changes)
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
+        self.refresh_apply_button_state()
 
     def _single_attr(self, attrs: dict[str, list[str]], attr: str) -> str:
         values = attrs.get(attr, [])
@@ -1515,6 +1548,7 @@ class UserPropertiesDialog(QDialog):
                 box.setToolTip("Active Directory controls lockout state via lockoutTime.")
             else:
                 box.setChecked(bool(flag_values & bitmask))
+            box.stateChanged.connect(self.refresh_apply_button_state)
             self.uac_checkboxes.append((box, bitmask))
             layout.addWidget(box)
 
@@ -1589,21 +1623,21 @@ class UserPropertiesDialog(QDialog):
             self.member_of_table.setItem(row, 0, name_item)
             self.member_of_table.setItem(row, 1, QTableWidgetItem(obj.dn))
             existing_dns.add(obj.dn)
+        self.refresh_apply_button_state()
 
     def remove_selected_group_memberships(self) -> None:
         rows = sorted({idx.row() for idx in self.member_of_table.selectionModel().selectedRows()}, reverse=True)
         for row in rows:
             self.member_of_table.removeRow(row)
+        self.refresh_apply_button_state()
 
-    def apply_account_changes(self) -> None:
+    def _edited_uac_and_unlock(self) -> tuple[int, bool]:
         new_uac = self.current_uac_value
         should_unlock = False
 
         for box, bitmask in self.uac_checkboxes:
             checked = box.isChecked()
             if bitmask == 0x0010:
-                if checked and not self.initially_locked:
-                    box.setChecked(False)
                 if (not checked) and self.initially_locked:
                     should_unlock = True
                 continue
@@ -1611,6 +1645,36 @@ class UserPropertiesDialog(QDialog):
                 new_uac |= bitmask
             else:
                 new_uac &= ~bitmask
+
+        return new_uac, should_unlock
+
+    def has_pending_changes(self) -> bool:
+        edited_uac, should_unlock = self._edited_uac_and_unlock()
+        if edited_uac != self.current_uac_value or should_unlock:
+            return True
+
+        current_groups = sorted(self._current_member_of_dns(), key=str.lower)
+        if current_groups != sorted(self.original_group_dns, key=str.lower):
+            return True
+
+        for attr_name in self.attribute_values:
+            current_values = self.attribute_values.get(attr_name, [])
+            original_values = self.original_attribute_values.get(attr_name, [])
+            if current_values != original_values:
+                return True
+
+        return False
+
+    def refresh_apply_button_state(self) -> None:
+        if self.apply_button:
+            self.apply_button.setEnabled(self.has_pending_changes())
+
+    def apply_account_changes(self) -> None:
+        for box, bitmask in self.uac_checkboxes:
+            if bitmask == 0x0010 and box.isChecked() and not self.initially_locked:
+                box.setChecked(False)
+
+        new_uac, should_unlock = self._edited_uac_and_unlock()
 
         if new_uac != self.current_uac_value:
             self.ldap.set_user_account_control(self.user_obj.dn, new_uac)
@@ -1620,6 +1684,17 @@ class UserPropertiesDialog(QDialog):
         if should_unlock:
             self.ldap.unlock_account(self.user_obj.dn)
             self.initially_locked = False
+
+    def apply_attribute_changes(self) -> None:
+        for attr_name in sorted(self.attribute_values):
+            if attr_name in self.NON_EDITABLE_ATTRIBUTES:
+                continue
+            current_values = self.attribute_values.get(attr_name, [])
+            original_values = self.original_attribute_values.get(attr_name, [])
+            if current_values == original_values:
+                continue
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, attr_name, current_values)
+            self.original_attribute_values[attr_name] = list(current_values)
 
     def apply_member_of_changes(self) -> None:
         desired = set(self._current_member_of_dns())
@@ -1640,6 +1715,8 @@ class UserPropertiesDialog(QDialog):
         try:
             self.apply_account_changes()
             self.apply_member_of_changes()
+            self.apply_attribute_changes()
+            self.refresh_apply_button_state()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
 
@@ -1647,6 +1724,7 @@ class UserPropertiesDialog(QDialog):
         try:
             self.apply_account_changes()
             self.apply_member_of_changes()
+            self.apply_attribute_changes()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return
@@ -1688,18 +1766,56 @@ class UserPropertiesDialog(QDialog):
     def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        text = QTextEdit()
-        text.setReadOnly(True)
 
-        lines: list[str] = []
-        for key, values in attrs.items():
-            lines.append(f"{key}:")
-            for v in values:
-                lines.append(f"  {v}")
-            lines.append("")
-        text.setPlainText("\n".join(lines))
-        layout.addWidget(text)
+        editor_layout = QHBoxLayout()
+        self.attributes_list = QListWidget()
+        for attr_name in sorted(attrs, key=str.lower):
+            self.attributes_list.addItem(attr_name)
+        self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
+
+        right_col = QVBoxLayout()
+        self.attribute_name_label = QLabel("Select an attribute")
+        self.attribute_value_edit = QTextEdit()
+        self.attribute_value_edit.textChanged.connect(self.on_attribute_text_changed)
+        right_col.addWidget(self.attribute_name_label)
+        right_col.addWidget(self.attribute_value_edit)
+
+        editor_layout.addWidget(self.attributes_list, 1)
+        editor_layout.addLayout(right_col, 2)
+        layout.addLayout(editor_layout)
+
+        if self.attributes_list.count() > 0:
+            self.attributes_list.setCurrentRow(0)
         return tab
+
+    def on_attribute_selected(self, attr_name: str) -> None:
+        self.selected_attribute = attr_name if attr_name else None
+        if not self.attribute_name_label or not self.attribute_value_edit:
+            return
+
+        if not attr_name:
+            self.attribute_name_label.setText("Select an attribute")
+            self.attribute_value_edit.clear()
+            self.attribute_value_edit.setReadOnly(True)
+            return
+
+        values = self.attribute_values.get(attr_name, [])
+        is_read_only = attr_name in self.NON_EDITABLE_ATTRIBUTES
+        self.attribute_name_label.setText(
+            f"{attr_name} {'(read-only)' if is_read_only else '(editable, one value per line)'}"
+        )
+        self.loading_attribute_text = True
+        self.attribute_value_edit.setPlainText("\n".join(values))
+        self.loading_attribute_text = False
+        self.attribute_value_edit.setReadOnly(is_read_only)
+
+    def on_attribute_text_changed(self) -> None:
+        if self.loading_attribute_text or not self.selected_attribute or not self.attribute_value_edit:
+            return
+        raw_text = self.attribute_value_edit.toPlainText()
+        values = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        self.attribute_values[self.selected_attribute] = values
+        self.refresh_apply_button_state()
 
 
 class ResetPasswordDialog(QDialog):
