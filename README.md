@@ -17,3 +17,5 @@ bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/
 ```
 
 If running as root, you will be prompted to install for all users, or just for yourself. If not running as root, the install will be for your profile only.
+
+A `.desktop` file will be generated for you (or all users) so the application may be opened from Application Launcher.
