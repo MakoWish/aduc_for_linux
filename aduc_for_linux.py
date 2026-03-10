@@ -234,58 +234,11 @@ def build_aduc_computer_icon(size: int = 16) -> QIcon:
     return QIcon(pixmap)
 
 
-def build_application_icon(size: int = 128) -> QIcon:
-    """Create a modern app icon for ADUC for Linux."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.transparent)
-
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-
-    pad = max(4, size // 16)
-    outer = size - (2 * pad)
-
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#12243F"))
-    painter.drawRoundedRect(pad, pad, outer, outer, size * 0.14, size * 0.14)
-
-    painter.setBrush(QColor("#2F67BC"))
-    painter.drawRoundedRect(pad + (size * 0.06), pad + (size * 0.06), outer - (size * 0.12), outer - (size * 0.12), size * 0.10, size * 0.10)
-
-    painter.setPen(QPen(QColor("#DDEAFF"), max(2, size // 26)))
-    painter.setBrush(QBrush(QColor("#8EC1FF")))
-
-    node_radius = max(4, size // 12)
-    center_x = size * 0.50
-    center_y = size * 0.36
-    left_x = size * 0.28
-    right_x = size * 0.72
-    bottom_y = size * 0.70
-
-    painter.drawLine(int(center_x), int(center_y + node_radius), int(left_x), int(bottom_y - node_radius))
-    painter.drawLine(int(center_x), int(center_y + node_radius), int(right_x), int(bottom_y - node_radius))
-    painter.drawLine(int(left_x + node_radius), int(bottom_y), int(right_x - node_radius), int(bottom_y))
-
-    painter.setBrush(QColor("#9DD4FF"))
-    painter.drawEllipse(int(center_x - node_radius), int(center_y - node_radius), node_radius * 2, node_radius * 2)
-    painter.setBrush(QColor("#BEE2FF"))
-    painter.drawEllipse(int(left_x - node_radius), int(bottom_y - node_radius), node_radius * 2, node_radius * 2)
-    painter.drawEllipse(int(right_x - node_radius), int(bottom_y - node_radius), node_radius * 2, node_radius * 2)
-
-    painter.setPen(QPen(QColor("#FFF1B8"), max(2, size // 28)))
-    painter.setBrush(QColor("#FFD25A"))
-    badge_size = max(10, size // 4)
-    badge_x = int(size * 0.65)
-    badge_y = int(size * 0.10)
-    painter.drawRoundedRect(badge_x, badge_y, badge_size, badge_size, size * 0.03, size * 0.03)
-
-    painter.setPen(QPen(QColor("#9A6900"), max(2, size // 50)))
-    slot_y = badge_y + (badge_size // 3)
-    painter.drawLine(badge_x + (badge_size // 5), slot_y, badge_x + int(badge_size * 0.8), slot_y)
-    painter.drawLine(badge_x + (badge_size // 5), slot_y + (badge_size // 4), badge_x + int(badge_size * 0.8), slot_y + (badge_size // 4))
-
-    painter.end()
-    return QIcon(pixmap)
+def build_application_icon() -> QIcon:
+    """Load the application icon from app_icon.png in the project directory."""
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_icon.png")
+    icon = QIcon(icon_path)
+    return icon if not icon.isNull() else QIcon.fromTheme("applications-system")
 
 
 def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
