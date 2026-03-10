@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -63,6 +62,16 @@ CONTAINER_CLASSES = {
 USER_CLASSES = {"user", "person", "organizationalperson"}
 GROUP_CLASSES = {"group"}
 COMPUTER_CLASSES = {"computer"}
+
+SEARCH_FILTER_USERS_CONTACTS_GROUPS = "users_contacts_groups"
+SEARCH_FILTER_COMPUTERS = "computers"
+SEARCH_FILTER_ORGANIZATIONAL_UNITS = "organizational_units"
+
+SEARCH_FILTER_OPTIONS = [
+    ("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS),
+    ("Computers", SEARCH_FILTER_COMPUTERS),
+    ("Organizational Units", SEARCH_FILTER_ORGANIZATIONAL_UNITS),
+]
 
 
 def build_aduc_ou_icon(has_child_ou: bool, size: int = 16) -> QIcon:
@@ -536,11 +545,9 @@ class LdapManager:
 
         return dict(sorted(out.items(), key=lambda kv: kv[0].lower()))
 
-    def search_objects(self, base_dn: str, term: str, size_limit: int = 200) -> list[LdapObject]:
-        if not self.conn:
-            return []
-
-        safe_term = (
+    @staticmethod
+    def _escape_search_term(term: str) -> str:
+        return (
             term.replace("\\", r"\5c")
             .replace("*", r"\2a")
             .replace("(", r"\28")
@@ -548,21 +555,41 @@ class LdapManager:
             .replace("\x00", "")
         )
 
-        search_filter = (
+    @staticmethod
+    def _search_object_class_filter(search_mode: str) -> str:
+        if search_mode == SEARCH_FILTER_COMPUTERS:
+            return "(objectClass=computer)"
+        if search_mode == SEARCH_FILTER_ORGANIZATIONAL_UNITS:
+            return "(objectClass=organizationalUnit)"
+        return "(|(objectClass=user)(objectClass=group)(objectClass=contact))"
+
+    def _build_search_filter(self, term: str, search_mode: str) -> str:
+        safe_term = self._escape_search_term(term)
+        class_filter = self._search_object_class_filter(search_mode)
+        return (
             "(&"
+            f"{class_filter}"
             "(|"
-            "(objectClass=user)"
-            "(objectClass=group)"
-            ")"
-            "(|"
-#            f"(cn=*{safe_term}*)"
+            f"(cn=*{safe_term}*)"
             f"(name=*{safe_term}*)"
             f"(sAMAccountName=*{safe_term}*)"
             f"(displayName=*{safe_term}*)"
-#            f"(description=*{safe_term}*)"
+            f"(description=*{safe_term}*)"
             ")"
             ")"
         )
+
+    def search_objects(
+        self,
+        base_dn: str,
+        term: str,
+        search_mode: str = SEARCH_FILTER_USERS_CONTACTS_GROUPS,
+        size_limit: int = 200,
+    ) -> list[LdapObject]:
+        if not self.conn:
+            return []
+
+        search_filter = self._build_search_filter(term, search_mode)
 
         self.conn.search(
             search_base=base_dn,
@@ -571,7 +598,6 @@ class LdapManager:
             attributes=["distinguishedName", "name", "cn", "objectClass", "description"],
             size_limit=size_limit,
         )
-
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
@@ -863,34 +889,17 @@ class LdapManager:
         if not ok:
             raise ValueError(str(self.conn.result))
 
-    def search_directory_objects(self, base_dn: str, term: str, size_limit: int = 200) -> list[LdapObject]:
+    def search_directory_objects(
+        self,
+        base_dn: str,
+        term: str,
+        search_mode: str = SEARCH_FILTER_USERS_CONTACTS_GROUPS,
+        size_limit: int = 200,
+    ) -> list[LdapObject]:
         if not self.conn:
             return []
 
-        safe_term = (
-            term.replace("\\", r"\5c")
-            .replace("*", r"\2a")
-            .replace("(", r"\28")
-            .replace(")", r"\29")
-            .replace("\x00", "")
-        )
-
-        search_filter = (
-            "(&"
-            "(|"
-            "(objectClass=user)"
-            "(objectClass=group)"
-            "(objectClass=computer)"
-            ")"
-            "(|"
-            f"(cn=*{safe_term}*)"
-            f"(name=*{safe_term}*)"
-            f"(sAMAccountName=*{safe_term}*)"
-            f"(displayName=*{safe_term}*)"
-            f"(description=*{safe_term}*)"
-            ")"
-            ")"
-        )
+        search_filter = self._build_search_filter(term, search_mode)
 
         self.conn.search(
             search_base=base_dn,
@@ -908,7 +917,6 @@ class LdapManager:
             ],
             size_limit=size_limit,
         )
-
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
@@ -1118,6 +1126,41 @@ class ResetPasswordDialog(QDialog):
         return self.password1_edit.text(), self.password2_edit.text()
 
 
+class SearchDialog(QDialog):
+    def __init__(self, base_dn: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Find")
+
+        self.term_edit = QLineEdit()
+        self.term_edit.setPlaceholderText("Name, sAMAccountName, displayName...")
+
+        self.scope_combo = QComboBox()
+        for label, value in SEARCH_FILTER_OPTIONS:
+            self.scope_combo.addItem(label, value)
+
+        form = QFormLayout()
+        form.addRow("Find what:", self.term_edit)
+        form.addRow("Find objects of type:", self.scope_combo)
+
+        base_label = QLabel(base_dn)
+        base_label.setWordWrap(True)
+        form.addRow("Search under:", base_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def term(self) -> str:
+        return self.term_edit.text().strip()
+
+    def search_mode(self) -> str:
+        return str(self.scope_combo.currentData())
+
+
 class SelectDirectoryObjectsDialog(QDialog):
     def __init__(self, ldap: LdapManager, search_base: str, parent=None) -> None:
         super().__init__(parent)
@@ -1130,11 +1173,16 @@ class SelectDirectoryObjectsDialog(QDialog):
         self.search_edit.setPlaceholderText("Name, sAMAccountName, displayName...")
         self.search_edit.returnPressed.connect(self.run_search)
 
+        self.search_type_combo = QComboBox()
+        for label, value in SEARCH_FILTER_OPTIONS:
+            self.search_type_combo.addItem(label, value)
+
         self.search_btn = QPushButton("Search")
         self.search_btn.clicked.connect(self.run_search)
 
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_edit)
+        search_row.addWidget(self.search_type_combo)
         search_row.addWidget(self.search_btn)
 
         self.results = QTableWidget()
@@ -1164,7 +1212,11 @@ class SelectDirectoryObjectsDialog(QDialog):
             return
 
         try:
-            results = self.ldap.search_directory_objects(self.search_base, term)
+            results = self.ldap.search_directory_objects(
+                self.search_base,
+                term,
+                search_mode=str(self.search_type_combo.currentData()),
+            )
         except Exception as e:
             QMessageBox.critical(self, "Search failed", str(e))
             return
@@ -1713,12 +1765,17 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 3, dn_item)
 
 
-    def run_search(self, base_dn: str, term: str) -> None:
+    def run_search(
+        self,
+        base_dn: str,
+        term: str,
+        search_mode: str = SEARCH_FILTER_USERS_CONTACTS_GROUPS,
+    ) -> None:
         if not term:
             return
 
         try:
-            results = self.ldap.search_objects(base_dn, term)
+            results = self.ldap.search_objects(base_dn, term, search_mode=search_mode)
         except Exception as e:
             self.show_error("Search failed", str(e))
             return
@@ -1825,9 +1882,9 @@ class MainWindow(QMainWindow):
                 self.load_tree_children(item)
                 self.populate_main_pane(obj.dn, add_history=False)
         elif chosen == search_action:
-            term, ok = QInputDialog.getText(self, "Search", f"Search under:\n{obj.dn}\n\nFind:")
-            if ok:
-                self.run_search(obj.dn, term.strip())
+            dlg = SearchDialog(obj.dn, self)
+            if dlg.exec() == QDialog.Accepted:
+                self.run_search(obj.dn, dlg.term(), search_mode=dlg.search_mode())
         elif chosen == copy_dn_action:
             self.copy_text_to_clipboard(obj.dn)
         elif expand_action is not None and chosen == expand_action:
