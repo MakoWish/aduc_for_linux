@@ -6,7 +6,7 @@ import os
 import ssl
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 from contextlib import contextmanager
 
 from PySide6.QtCore import QMimeData, Signal, Qt, QTimer
@@ -426,6 +426,26 @@ class LdapManager:
             raise_exceptions=True,
         )
 
+    @staticmethod
+    def _entry_attr_values(entry: Any, attr_name: str) -> list[str]:
+        if attr_name not in entry:
+            return []
+
+        try:
+            values = getattr(entry, attr_name).values
+        except Exception:
+            return []
+
+        if not isinstance(values, list):
+            values = [values]
+
+        result: list[str] = []
+        for value in values:
+            v = str(value).strip()
+            if v:
+                result.append(v)
+        return result
+
     def get_naming_contexts(self) -> list[str]:
         if not self.conn:
             return []
@@ -442,16 +462,99 @@ class LdapManager:
         entry = self.conn.entries[0]
         contexts: list[str] = []
 
-        if "namingContexts" in entry:
-            try:
-                for value in entry.namingContexts.values:
-                    v = str(value)
-                    if v and v not in contexts:
-                        contexts.append(v)
-            except Exception:
-                pass
+        for value in self._entry_attr_values(entry, "namingContexts"):
+            if value not in contexts:
+                contexts.append(value)
 
         return contexts
+
+    def get_directory_partitions(self) -> dict[str, Any]:
+        if not self.conn:
+            return {
+                "default_naming_context": None,
+                "root_domain_naming_context": None,
+                "configuration_naming_context": None,
+                "schema_naming_context": None,
+                "domain_naming_contexts": [],
+                "all_naming_contexts": [],
+            }
+
+        self.conn.search(
+            search_base="",
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=[
+                "defaultNamingContext",
+                "rootDomainNamingContext",
+                "configurationNamingContext",
+                "schemaNamingContext",
+                "namingContexts",
+            ],
+        )
+        if not self.conn.entries:
+            return {
+                "default_naming_context": None,
+                "root_domain_naming_context": None,
+                "configuration_naming_context": None,
+                "schema_naming_context": None,
+                "domain_naming_contexts": [],
+                "all_naming_contexts": [],
+            }
+
+        entry = self.conn.entries[0]
+        default_nc = next(iter(self._entry_attr_values(entry, "defaultNamingContext")), None)
+        root_domain_nc = next(iter(self._entry_attr_values(entry, "rootDomainNamingContext")), None)
+        config_nc = next(iter(self._entry_attr_values(entry, "configurationNamingContext")), None)
+        schema_nc = next(iter(self._entry_attr_values(entry, "schemaNamingContext")), None)
+        naming_contexts = self._entry_attr_values(entry, "namingContexts")
+
+        excluded = {x for x in [config_nc, schema_nc] if x}
+        domain_ncs: list[str] = []
+        for nc in naming_contexts:
+            if nc in excluded:
+                continue
+            if nc.upper().startswith("DC="):
+                domain_ncs.append(nc)
+
+        return {
+            "default_naming_context": default_nc,
+            "root_domain_naming_context": root_domain_nc,
+            "configuration_naming_context": config_nc,
+            "schema_naming_context": schema_nc,
+            "domain_naming_contexts": domain_ncs,
+            "all_naming_contexts": naming_contexts,
+        }
+
+    def get_trusted_domains(self, base_dn: str) -> list[dict[str, str]]:
+        if not self.conn or not base_dn:
+            return []
+
+        trusted_domains: list[dict[str, str]] = []
+        system_dn = f"CN=System,{base_dn}"
+
+        entries = self._paged_search_entries(
+            search_base=system_dn,
+            search_filter="(objectClass=trustedDomain)",
+            search_scope=LEVEL,
+            attributes=["name", "trustPartner", "flatName"],
+        )
+
+        for entry in entries:
+            partners = self._entry_attr_values(entry, "trustPartner")
+            if not partners:
+                continue
+
+            partner = partners[0]
+            flat_name = next(iter(self._entry_attr_values(entry, "flatName")), "")
+            trusted_domains.append(
+                {
+                    "partner": partner,
+                    "flat_name": flat_name,
+                }
+            )
+
+        trusted_domains.sort(key=lambda x: x["partner"].lower())
+        return trusted_domains
 
     @staticmethod
     def _display_name(entry, object_classes: list[str], fallback: str) -> str:
@@ -1793,17 +1896,86 @@ class MainWindow(QMainWindow):
         self.current_dn = None
 
         try:
-            contexts = self.ldap.get_naming_contexts()
+            partitions = self.ldap.get_directory_partitions()
         except Exception as e:
             self.show_error("Failed to read RootDSE", str(e))
             return
 
-        for dn in contexts:
-            item = QTreeWidgetItem([dn])
+        default_nc = partitions.get("default_naming_context")
+        root_domain_nc = partitions.get("root_domain_naming_context")
+        domain_ncs = partitions.get("domain_naming_contexts", [])
+
+        ordered_roots: list[tuple[str, str]] = []
+
+        if root_domain_nc:
+            label = f"{root_domain_nc} (Forest Root)"
+            ordered_roots.append((label, root_domain_nc))
+
+        if default_nc and default_nc != root_domain_nc:
+            label = f"{default_nc} (Current Domain)"
+            ordered_roots.append((label, default_nc))
+
+        for dn in domain_ncs:
+            if any(existing_dn == dn for _, existing_dn in ordered_roots):
+                continue
+            ordered_roots.append((dn, dn))
+
+        for label, dn in ordered_roots:
+            item = QTreeWidgetItem([label])
             item.setData(0, Qt.UserRole, {"dn": dn, "loaded": False, "container": True})
             item.setIcon(0, self.style().standardIcon(QStyle.SP_DirHomeIcon))
             item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             self.tree.addTopLevelItem(item)
+
+        trusted_domains: list[dict[str, str]] = []
+        if default_nc:
+            try:
+                trusted_domains = self.ldap.get_trusted_domains(default_nc)
+            except Exception:
+                trusted_domains = []
+
+        if trusted_domains:
+            trusted_root = QTreeWidgetItem(["Trusted Domains"])
+            trusted_root.setData(0, Qt.UserRole, {"dn": None, "loaded": True, "container": False})
+            trusted_root.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+            self.tree.addTopLevelItem(trusted_root)
+
+            known_domains = set(domain_ncs)
+            for trusted in trusted_domains:
+                partner = trusted.get("partner", "")
+                flat_name = trusted.get("flat_name", "")
+                text = partner
+                if flat_name:
+                    text = f"{partner} ({flat_name})"
+
+                browse_dn = ""
+                if partner:
+                    candidate_dn = ",".join(f"DC={part}" for part in partner.split(".") if part)
+                    if candidate_dn in known_domains:
+                        browse_dn = candidate_dn
+
+                child_item = QTreeWidgetItem([text])
+                child_item.setIcon(0, self.style().standardIcon(QStyle.SP_DirLinkIcon))
+                if browse_dn:
+                    child_item.setData(0, Qt.UserRole, {"dn": browse_dn, "loaded": False, "container": True})
+                    child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                else:
+                    child_item.setData(0, Qt.UserRole, {"dn": None, "loaded": True, "container": False})
+                trusted_root.addChild(child_item)
+
+            trusted_root.setExpanded(True)
+
+        if not ordered_roots and not trusted_domains:
+            contexts = self.ldap.get_naming_contexts()
+            for dn in contexts:
+                item = QTreeWidgetItem([dn])
+                item.setData(0, Qt.UserRole, {"dn": dn, "loaded": False, "container": True})
+                item.setIcon(0, self.style().standardIcon(QStyle.SP_DirHomeIcon))
+                item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+                self.tree.addTopLevelItem(item)
+
+        for index in range(self.tree.topLevelItemCount()):
+            self.tree.topLevelItem(index).setExpanded(True)
 
     def load_tree_children(self, item: QTreeWidgetItem) -> None:
         data = item.data(0, Qt.UserRole) or {}
