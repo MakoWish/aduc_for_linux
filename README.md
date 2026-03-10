@@ -1,5 +1,5 @@
 <h1>
-  <img src='image.png' alt="Active Directory Users and Computers for Linux" width="150" height="150" align="left" style="vertical-align: middle; margin-right:10px; margin-bottom: 4px;">
+  <img src='image.png' width="150" align="left">
   ADUC for Linux
 </h1>
 
