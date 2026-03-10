@@ -1382,6 +1382,186 @@ class PropertiesDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class UserPropertiesDialog(QDialog):
+    UAC_FLAGS: list[tuple[str, int]] = [
+        ("Account is disabled", 0x0002),
+        ("Account is locked out", 0x0010),
+        ("Password not required", 0x0020),
+        ("Password cannot change", 0x0040),
+        ("Password never expires", 0x10000),
+        ("Smart card required", 0x40000),
+        ("Trusted for delegation", 0x80000),
+    ]
+
+    def __init__(self, obj: LdapObject, attrs: dict[str, list[str]], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(obj.name)
+        self.resize(920, 650)
+
+        tabs = QTabWidget()
+        tabs.addTab(self.build_general_tab(obj, attrs), "General")
+        tabs.addTab(self.build_address_tab(attrs), "Address")
+        tabs.addTab(self.build_account_tab(attrs), "Account")
+        tabs.addTab(self.build_profile_tab(attrs), "Profile")
+        tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
+        tabs.addTab(self.build_object_tab(obj, attrs), "Object")
+        tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addWidget(buttons)
+
+    def _single_attr(self, attrs: dict[str, list[str]], attr: str) -> str:
+        values = attrs.get(attr, [])
+        return values[0] if values else ""
+
+    def _readonly_line(self, value: str) -> QLineEdit:
+        edit = QLineEdit(value)
+        edit.setReadOnly(True)
+        return edit
+
+    def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.addRow("First name:", self._readonly_line(self._single_attr(attrs, "givenName")))
+        form.addRow("Initials:", self._readonly_line(self._single_attr(attrs, "initials")))
+        form.addRow("Last name:", self._readonly_line(self._single_attr(attrs, "sn")))
+        form.addRow("Display name:", self._readonly_line(self._single_attr(attrs, "displayName") or obj.name))
+        form.addRow("Description:", self._readonly_line(self._single_attr(attrs, "description")))
+        form.addRow("Office:", self._readonly_line(self._single_attr(attrs, "physicalDeliveryOfficeName")))
+        form.addRow("Telephone number:", self._readonly_line(self._single_attr(attrs, "telephoneNumber")))
+        form.addRow("E-mail:", self._readonly_line(self._single_attr(attrs, "mail")))
+        form.addRow("Web page:", self._readonly_line(self._single_attr(attrs, "wWWHomePage")))
+        return tab
+
+    def build_address_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.addRow("Street:", self._readonly_line(self._single_attr(attrs, "streetAddress")))
+        form.addRow("P.O. box:", self._readonly_line(self._single_attr(attrs, "postOfficeBox")))
+        form.addRow("City:", self._readonly_line(self._single_attr(attrs, "l")))
+        form.addRow("State/province:", self._readonly_line(self._single_attr(attrs, "st")))
+        form.addRow("ZIP/Postal code:", self._readonly_line(self._single_attr(attrs, "postalCode")))
+        form.addRow("Country/region:", self._readonly_line(self._single_attr(attrs, "co")))
+        return tab
+
+    def build_account_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        form = QFormLayout()
+
+        form.addRow("User logon name:", self._readonly_line(self._single_attr(attrs, "userPrincipalName")))
+        form.addRow("User logon name (pre-Windows 2000):", self._readonly_line(self._single_attr(attrs, "sAMAccountName")))
+        form.addRow("Logon script:", self._readonly_line(self._single_attr(attrs, "scriptPath")))
+        form.addRow("Home folder:", self._readonly_line(self._single_attr(attrs, "homeDirectory")))
+
+        uac_raw = self._single_attr(attrs, "userAccountControl")
+        form.addRow("userAccountControl:", self._readonly_line(uac_raw))
+        layout.addLayout(form)
+
+        flags_label = QLabel("Account options")
+        layout.addWidget(flags_label)
+
+        flag_values = 0
+        try:
+            flag_values = int(uac_raw) if uac_raw else 0
+        except ValueError:
+            flag_values = 0
+
+        for label, bitmask in self.UAC_FLAGS:
+            box = QCheckBox(label)
+            box.setEnabled(False)
+            box.setChecked(bool(flag_values & bitmask))
+            layout.addWidget(box)
+
+        layout.addStretch()
+        return tab
+
+    def build_profile_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.addRow("Profile path:", self._readonly_line(self._single_attr(attrs, "profilePath")))
+        form.addRow("Logon script:", self._readonly_line(self._single_attr(attrs, "scriptPath")))
+        form.addRow("Home drive:", self._readonly_line(self._single_attr(attrs, "homeDrive")))
+        form.addRow("Home folder:", self._readonly_line(self._single_attr(attrs, "homeDirectory")))
+        return tab
+
+    def build_member_of_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        table = QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Name", "Distinguished Name"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+
+        groups = attrs.get("memberOf", [])
+        table.setRowCount(len(groups))
+        for row, dn in enumerate(sorted(groups, key=str.lower)):
+            short_name = dn.split(",", 1)[0].split("=", 1)[-1] if "=" in dn else dn
+            table.setItem(row, 0, QTableWidgetItem(short_name))
+            table.setItem(row, 1, QTableWidgetItem(dn))
+
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        layout.addWidget(table)
+        return tab
+
+
+    @staticmethod
+    def dn_to_canonical_name(dn: str) -> str:
+        parts = [part.strip() for part in dn.split(",") if part.strip()]
+        dc_parts: list[str] = []
+        path_parts: list[str] = []
+
+        for part in reversed(parts):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key_upper = key.upper()
+            if key_upper == "DC":
+                dc_parts.append(value)
+            elif key_upper in {"OU", "CN"}:
+                path_parts.append(value)
+
+        domain = ".".join(dc_parts)
+        path = "/".join(path_parts)
+        if domain and path:
+            return f"{domain}/{path}"
+        return domain or path or dn
+
+    def build_object_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.addRow("Canonical name:", self._readonly_line(self.dn_to_canonical_name(obj.dn)))
+        form.addRow("Distinguished name:", self._readonly_line(obj.dn))
+        form.addRow("Object class:", self._readonly_line(obj.object_type))
+        form.addRow("Created:", self._readonly_line(self._single_attr(attrs, "whenCreated")))
+        form.addRow("Modified:", self._readonly_line(self._single_attr(attrs, "whenChanged")))
+        return tab
+
+    def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        text = QTextEdit()
+        text.setReadOnly(True)
+
+        lines: list[str] = []
+        for key, values in attrs.items():
+            lines.append(f"{key}:")
+            for v in values:
+                lines.append(f"  {v}")
+            lines.append("")
+        text.setPlainText("\n".join(lines))
+        layout.addWidget(text)
+        return tab
+
+
 class ResetPasswordDialog(QDialog):
     def __init__(self, obj_name: str, parent=None) -> None:
         super().__init__(parent)
@@ -2470,6 +2650,8 @@ class MainWindow(QMainWindow):
 
         if obj.object_type == "Group" and search_base:
             dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+        elif obj.object_type == "User":
+            dlg = UserPropertiesDialog(obj, attrs, self)
         else:
             dlg = PropertiesDialog(obj, attrs, self)
         dlg.exec()
