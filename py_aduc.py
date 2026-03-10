@@ -7,6 +7,7 @@ import ssl
 import sys
 from dataclasses import dataclass
 from typing import Optional
+from contextlib import contextmanager
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPen, QPixmap
@@ -1370,6 +1371,14 @@ class MainWindow(QMainWindow):
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
 
+    @contextmanager
+    def busy_cursor(self):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            yield
+        finally:
+            QApplication.restoreOverrideCursor()
+
     def run_with_loading(self, message: str, action) -> None:
         loading = QProgressDialog(message, None, 0, 0, self)
         loading.setWindowTitle("Please wait")
@@ -1792,7 +1801,8 @@ class MainWindow(QMainWindow):
         data = item.data(0, Qt.UserRole) or {}
         dn = data.get("dn")
         if dn:
-            self.populate_main_pane(dn)
+            with self.busy_cursor():
+                self.populate_main_pane(dn)
 
     def on_tree_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         data = item.data(0, Qt.UserRole) or {}
@@ -1803,10 +1813,11 @@ class MainWindow(QMainWindow):
             return
 
         if is_container:
-            self.tree.setCurrentItem(item)
-            self.populate_main_pane(dn)
-            self.load_tree_children(item)
-            QTimer.singleShot(0, lambda i=item: self.tree.expandItem(i))
+            with self.busy_cursor():
+                self.tree.setCurrentItem(item)
+                self.populate_main_pane(dn)
+                self.load_tree_children(item)
+                QTimer.singleShot(0, lambda i=item: self.tree.expandItem(i))
         else:
             obj = LdapObject(dn=dn, name=item.text(0), object_classes=[])
             self.open_properties(obj)
