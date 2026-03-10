@@ -1358,8 +1358,13 @@ class MainWindow(QMainWindow):
         self.saved_port = 636
         self.auto_connect = False
         self.main_table_column_widths: list[int] = []
+        self.window_size: Optional[tuple[int, int]] = None
+        self.main_splitter_sizes: list[int] = []
         self.current_dn: Optional[str] = None
         self.load_settings()
+
+        if self.window_size:
+            self.resize(*self.window_size)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Active Directory")
@@ -1385,15 +1390,16 @@ class MainWindow(QMainWindow):
 
         self.apply_saved_main_table_widths()
 
-        splitter = QSplitter()
-        splitter.addWidget(self.tree)
-        splitter.addWidget(self.table)
-        splitter.setStretchFactor(1, 1)
+        self.splitter = QSplitter()
+        self.splitter.addWidget(self.tree)
+        self.splitter.addWidget(self.table)
+        self.splitter.setStretchFactor(1, 1)
+        self.apply_saved_splitter_sizes()
 
         central = QWidget()
         root_layout = QVBoxLayout(central)
 
-        root_layout.addWidget(splitter, 1)
+        root_layout.addWidget(self.splitter, 1)
 
         self.setCentralWidget(central)
 
@@ -1478,6 +1484,24 @@ class MainWindow(QMainWindow):
                     continue
             self.main_table_column_widths = parsed_widths
 
+        try:
+            width = int(data.get("window_width", 0))
+            height = int(data.get("window_height", 0))
+            if width > 0 and height > 0:
+                self.window_size = (width, height)
+        except (TypeError, ValueError):
+            self.window_size = None
+
+        splitter_sizes = data.get("main_splitter_sizes", [])
+        if isinstance(splitter_sizes, list):
+            parsed_splitter_sizes: list[int] = []
+            for size in splitter_sizes:
+                try:
+                    parsed_splitter_sizes.append(int(size))
+                except (TypeError, ValueError):
+                    continue
+            self.main_splitter_sizes = parsed_splitter_sizes
+
     def save_settings(self) -> None:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         data = {
@@ -1486,6 +1510,9 @@ class MainWindow(QMainWindow):
             "port": self.saved_port,
             "auto_connect": self.auto_connect,
             "main_table_column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
+            "window_width": self.width(),
+            "window_height": self.height(),
+            "main_splitter_sizes": self.splitter.sizes(),
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -1498,6 +1525,15 @@ class MainWindow(QMainWindow):
             if index >= self.table.columnCount() or width <= 0:
                 continue
             self.table.setColumnWidth(index, width)
+
+    def apply_saved_splitter_sizes(self) -> None:
+        if len(self.main_splitter_sizes) < 2:
+            return
+
+        if any(size <= 0 for size in self.main_splitter_sizes[:2]):
+            return
+
+        self.splitter.setSizes(self.main_splitter_sizes)
 
     def closeEvent(self, event) -> None:
         self.save_settings()
