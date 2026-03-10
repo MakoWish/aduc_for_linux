@@ -18,6 +18,7 @@ It is intentionally small and focused: one Python app, one installer script, and
   - Groups
   - Computers
   - Organizational Units
+- Create users, groups, computers, and organizational units from Action/context menus.
 - Basic ADUC-like iconography and object-state overlays.
 - Desktop launcher installation for user-only or system-wide installs.
 - Startup version check against GitHub with update prompt when a newer release is available.
