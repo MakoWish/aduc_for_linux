@@ -493,7 +493,7 @@ class LdapManager:
             return
 
         for obj in objects:
-            if "organizationalunit" not in obj.object_classes:
+            if "organizationalUnit" not in obj.object_classes:
                 continue
 
             try:
