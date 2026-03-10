@@ -16,6 +16,7 @@ from PySide6.QtCore import QMimeData, Signal, Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QMenu,
     QInputDialog,
@@ -1071,6 +1072,106 @@ class LdapManager:
             raise ValueError(str(self.conn.result))
         return ou_dn
 
+    def create_group(
+        self,
+        parent_dn: str,
+        name: str,
+        sam_account_name: str,
+        description: str = "",
+        scope: str = "Global",
+        security_enabled: bool = True,
+    ) -> str:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        group_dn = f"CN={name},{parent_dn}"
+        scope_bits = {"Global": 0x00000002, "Domain Local": 0x00000004, "Universal": 0x00000008}
+        group_type = scope_bits.get(scope, 0x00000002)
+        if security_enabled:
+            group_type |= 0x80000000
+        if group_type > 0x7FFFFFFF:
+            group_type -= 0x100000000
+
+        attributes: dict[str, Any] = {
+            "objectClass": ["top", "group"],
+            "cn": name,
+            "sAMAccountName": sam_account_name,
+            "groupType": str(group_type),
+        }
+        if description:
+            attributes["description"] = description
+
+        ok = self.conn.add(group_dn, attributes=attributes)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+        return group_dn
+
+    def create_user(
+        self,
+        parent_dn: str,
+        name: str,
+        sam_account_name: str,
+        password: str = "",
+        description: str = "",
+        user_principal_name: str = "",
+        enabled: bool = False,
+    ) -> str:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        user_dn = f"CN={name},{parent_dn}"
+        attributes: dict[str, Any] = {
+            "objectClass": ["top", "person", "organizationalPerson", "user"],
+            "cn": name,
+            "sn": name,
+            "displayName": name,
+            "sAMAccountName": sam_account_name,
+            "userAccountControl": "514",
+        }
+        if description:
+            attributes["description"] = description
+        if user_principal_name:
+            attributes["userPrincipalName"] = user_principal_name
+
+        ok = self.conn.add(user_dn, attributes=attributes)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
+        if password:
+            self.reset_password(user_dn, password)
+            self.set_user_enabled(user_dn, enabled)
+
+        return user_dn
+
+    def create_computer(
+        self,
+        parent_dn: str,
+        name: str,
+        sam_account_name: str,
+        description: str = "",
+        enabled: bool = True,
+    ) -> str:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        computer_dn = f"CN={name},{parent_dn}"
+        normalized_sam = sam_account_name if sam_account_name.endswith("$") else f"{sam_account_name}$"
+        uac = 0x1000 if enabled else (0x1000 | 0x2)
+
+        attributes: dict[str, Any] = {
+            "objectClass": ["top", "person", "organizationalPerson", "user", "computer"],
+            "cn": name,
+            "sAMAccountName": normalized_sam,
+            "userAccountControl": str(uac),
+        }
+        if description:
+            attributes["description"] = description
+
+        ok = self.conn.add(computer_dn, attributes=attributes)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+        return computer_dn
+
     def search_directory_objects(
         self,
         base_dn: str,
@@ -1306,6 +1407,118 @@ class ResetPasswordDialog(QDialog):
 
     def passwords(self) -> tuple[str, str]:
         return self.password1_edit.text(), self.password2_edit.text()
+
+
+class NewUserDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New User")
+
+        self.name_edit = QLineEdit()
+        self.sam_edit = QLineEdit()
+        self.upn_edit = QLineEdit()
+        self.description_edit = QLineEdit()
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.enable_checkbox = QCheckBox("Enable account after creation")
+
+        form = QFormLayout()
+        form.addRow("Name:", self.name_edit)
+        form.addRow("Logon name (sAMAccountName):", self.sam_edit)
+        form.addRow("User principal name (optional):", self.upn_edit)
+        form.addRow("Description (optional):", self.description_edit)
+        form.addRow("Initial password (optional):", self.password_edit)
+        form.addRow("", self.enable_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[str, str, str, str, str, bool]:
+        return (
+            self.name_edit.text().strip(),
+            self.sam_edit.text().strip(),
+            self.upn_edit.text().strip(),
+            self.description_edit.text().strip(),
+            self.password_edit.text(),
+            self.enable_checkbox.isChecked(),
+        )
+
+
+class NewGroupDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New Group")
+
+        self.name_edit = QLineEdit()
+        self.sam_edit = QLineEdit()
+        self.description_edit = QLineEdit()
+        self.scope_combo = QComboBox()
+        self.scope_combo.addItems(["Global", "Domain Local", "Universal"])
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(["Security", "Distribution"])
+
+        form = QFormLayout()
+        form.addRow("Name:", self.name_edit)
+        form.addRow("Pre-Windows 2000 name (sAMAccountName):", self.sam_edit)
+        form.addRow("Description (optional):", self.description_edit)
+        form.addRow("Group scope:", self.scope_combo)
+        form.addRow("Group type:", self.type_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[str, str, str, str, bool]:
+        return (
+            self.name_edit.text().strip(),
+            self.sam_edit.text().strip(),
+            self.description_edit.text().strip(),
+            self.scope_combo.currentText(),
+            self.type_combo.currentText() == "Security",
+        )
+
+
+class NewComputerDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("New Computer")
+
+        self.name_edit = QLineEdit()
+        self.sam_edit = QLineEdit()
+        self.description_edit = QLineEdit()
+        self.enable_checkbox = QCheckBox("Enable computer account")
+        self.enable_checkbox.setChecked(True)
+
+        form = QFormLayout()
+        form.addRow("Computer name:", self.name_edit)
+        form.addRow("Pre-Windows 2000 name (sAMAccountName):", self.sam_edit)
+        form.addRow("Description (optional):", self.description_edit)
+        form.addRow("", self.enable_checkbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> tuple[str, str, str, bool]:
+        return (
+            self.name_edit.text().strip(),
+            self.sam_edit.text().strip(),
+            self.description_edit.text().strip(),
+            self.enable_checkbox.isChecked(),
+        )
 
 
 class SearchDialog(QDialog):
@@ -1833,6 +2046,18 @@ class MainWindow(QMainWindow):
         action_menu.addAction(self.delete_action)
 
         action_menu.addSeparator()
+        self.new_user_action = QAction("New User...", self)
+        self.new_user_action.triggered.connect(self.create_user_in_current)
+        action_menu.addAction(self.new_user_action)
+
+        self.new_group_action = QAction("New Group...", self)
+        self.new_group_action.triggered.connect(self.create_group_in_current)
+        action_menu.addAction(self.new_group_action)
+
+        self.new_computer_action = QAction("New Computer...", self)
+        self.new_computer_action.triggered.connect(self.create_computer_in_current)
+        action_menu.addAction(self.new_computer_action)
+
         self.new_ou_action = QAction("New Organizational Unit...", self)
         self.new_ou_action.triggered.connect(self.create_ou_in_current)
         action_menu.addAction(self.new_ou_action)
@@ -2364,6 +2589,97 @@ class MainWindow(QMainWindow):
 
         self.refresh_current()
 
+    def create_user_under_dn(self, parent_dn: str) -> None:
+        dlg = NewUserDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        name, sam_account_name, upn, description, password, enabled = dlg.values()
+        if not name or not sam_account_name:
+            self.show_error("Create user failed", "Name and logon name are required.")
+            return
+
+        try:
+            self.ldap.create_user(
+                parent_dn,
+                name,
+                sam_account_name,
+                password=password,
+                description=description,
+                user_principal_name=upn,
+                enabled=enabled,
+            )
+        except Exception as e:
+            self.show_error("Create user failed", str(e))
+            return
+
+        self.refresh_current()
+
+    def create_group_under_dn(self, parent_dn: str) -> None:
+        dlg = NewGroupDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        name, sam_account_name, description, scope, security_enabled = dlg.values()
+        if not name or not sam_account_name:
+            self.show_error("Create group failed", "Name and pre-Windows 2000 name are required.")
+            return
+
+        try:
+            self.ldap.create_group(
+                parent_dn,
+                name,
+                sam_account_name,
+                description=description,
+                scope=scope,
+                security_enabled=security_enabled,
+            )
+        except Exception as e:
+            self.show_error("Create group failed", str(e))
+            return
+
+        self.refresh_current()
+
+    def create_computer_under_dn(self, parent_dn: str) -> None:
+        dlg = NewComputerDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        name, sam_account_name, description, enabled = dlg.values()
+        if not name:
+            self.show_error("Create computer failed", "Computer name is required.")
+            return
+
+        effective_sam = sam_account_name or name
+        try:
+            self.ldap.create_computer(
+                parent_dn,
+                name,
+                effective_sam,
+                description=description,
+                enabled=enabled,
+            )
+        except Exception as e:
+            self.show_error("Create computer failed", str(e))
+            return
+
+        self.refresh_current()
+
+    def create_user_in_current(self) -> None:
+        if not self.current_dn:
+            return
+        self.create_user_under_dn(self.current_dn)
+
+    def create_group_in_current(self) -> None:
+        if not self.current_dn:
+            return
+        self.create_group_under_dn(self.current_dn)
+
+    def create_computer_in_current(self) -> None:
+        if not self.current_dn:
+            return
+        self.create_computer_under_dn(self.current_dn)
+
     def ldap_object_from_tree_item(self, item: QTreeWidgetItem) -> Optional[LdapObject]:
         if not item:
             return None
@@ -2396,6 +2712,9 @@ class MainWindow(QMainWindow):
         properties_action = menu.addAction("Properties")
         refresh_action = menu.addAction("Refresh")
         search_action = menu.addAction("Find...")
+        create_user_action = menu.addAction("New User...") if obj.is_container else None
+        create_group_action = menu.addAction("New Group...") if obj.is_container else None
+        create_computer_action = menu.addAction("New Computer...") if obj.is_container else None
         create_ou_action = menu.addAction("New Organizational Unit...") if obj.is_container else None
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
@@ -2432,6 +2751,12 @@ class MainWindow(QMainWindow):
                     self.show_error("Create OU failed", str(e))
                     return
                 self.refresh_current()
+        elif create_user_action is not None and chosen == create_user_action:
+            self.create_user_under_dn(obj.dn)
+        elif create_group_action is not None and chosen == create_group_action:
+            self.create_group_under_dn(obj.dn)
+        elif create_computer_action is not None and chosen == create_computer_action:
+            self.create_computer_under_dn(obj.dn)
         elif chosen == copy_dn_action:
             self.copy_text_to_clipboard(obj.dn)
         elif expand_action is not None and chosen == expand_action:
@@ -2478,6 +2803,16 @@ class MainWindow(QMainWindow):
         open_action = None
         if is_single and obj.is_container:
             open_action = menu.addAction("Open")
+            menu.addSeparator()
+            new_user_action = menu.addAction("New User...")
+            new_group_action = menu.addAction("New Group...")
+            new_computer_action = menu.addAction("New Computer...")
+            new_ou_action = menu.addAction("New Organizational Unit...")
+        else:
+            new_user_action = None
+            new_group_action = None
+            new_computer_action = None
+            new_ou_action = None
 
         enable_action = None
         disable_action = None
@@ -2525,6 +2860,22 @@ class MainWindow(QMainWindow):
                 self.load_tree_children(tree_item)
                 QTimer.singleShot(0, lambda i=tree_item: self.tree.expandItem(i))
                 self.tree.setCurrentItem(tree_item)
+        elif new_user_action is not None and chosen == new_user_action:
+            self.create_user_under_dn(obj.dn)
+        elif new_group_action is not None and chosen == new_group_action:
+            self.create_group_under_dn(obj.dn)
+        elif new_computer_action is not None and chosen == new_computer_action:
+            self.create_computer_under_dn(obj.dn)
+        elif new_ou_action is not None and chosen == new_ou_action:
+            name, ok = QInputDialog.getText(self, "New Organizational Unit", "Name:")
+            name = name.strip()
+            if ok and name:
+                try:
+                    self.ldap.create_organizational_unit(obj.dn, name)
+                except Exception as e:
+                    self.show_error("Create OU failed", str(e))
+                    return
+                self.refresh_current()
         elif reset_password_action is not None and chosen == reset_password_action:
             self.reset_password_for_object(obj)
         elif enable_action is not None and chosen == enable_action:
