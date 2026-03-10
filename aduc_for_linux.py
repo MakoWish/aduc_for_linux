@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QMimeData, Signal, Qt, QTimer
+from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -1381,6 +1381,125 @@ class GroupPropertiesDialog(QDialog):
         self.accept()
 
 
+class DirectoryTableWidget(QTableWidget):
+    group_membership_drop = Signal(object, list)
+
+    DRAG_MIME_TYPE = "application/x-aduc-directory-objects"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.CopyAction)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+
+    def startDrag(self, supported_actions) -> None:
+        selected_rows = sorted({idx.row() for idx in self.selectionModel().selectedRows()})
+        payload: list[dict[str, str]] = []
+        for row in selected_rows:
+            item = self.item(row, 0)
+            if not item:
+                continue
+            obj = item.data(Qt.UserRole)
+            if not isinstance(obj, LdapObject):
+                continue
+            payload.append({"dn": obj.dn, "type": obj.object_type})
+
+        if not payload:
+            return
+
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(self.DRAG_MIME_TYPE, json.dumps(payload).encode("utf-8"))
+        drag.setMimeData(mime)
+        drag.exec(Qt.CopyAction)
+
+    def dragEnterEvent(self, event) -> None:
+        if self._can_accept_drop(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._can_accept_drop(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:
+        if not self._can_accept_drop(event):
+            event.ignore()
+            return
+
+        item = self.itemAt(event.position().toPoint())
+        if not item:
+            event.ignore()
+            return
+
+        target_name_item = self.item(item.row(), 0)
+        if not target_name_item:
+            event.ignore()
+            return
+
+        target_obj = target_name_item.data(Qt.UserRole)
+        if not isinstance(target_obj, LdapObject) or target_obj.object_type != "Group":
+            event.ignore()
+            return
+
+        payload = self._decode_drop_payload(event)
+        if not payload:
+            event.ignore()
+            return
+
+        self.group_membership_drop.emit(target_obj, payload)
+        event.acceptProposedAction()
+
+    def _can_accept_drop(self, event) -> bool:
+        item = self.itemAt(event.position().toPoint())
+        if not item:
+            return False
+
+        target_name_item = self.item(item.row(), 0)
+        if not target_name_item:
+            return False
+
+        target_obj = target_name_item.data(Qt.UserRole)
+        if not isinstance(target_obj, LdapObject):
+            return False
+        if target_obj.object_type != "Group":
+            return False
+
+        payload = self._decode_drop_payload(event)
+        return bool(payload)
+
+    def _decode_drop_payload(self, event) -> list[dict[str, str]]:
+        mime = event.mimeData()
+        if not mime or not mime.hasFormat(self.DRAG_MIME_TYPE):
+            return []
+
+        try:
+            raw = bytes(mime.data(self.DRAG_MIME_TYPE))
+            parsed = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return []
+
+        decoded: list[dict[str, str]] = []
+        if not isinstance(parsed, list):
+            return decoded
+
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            dn = str(entry.get("dn", "")).strip()
+            obj_type = str(entry.get("type", "")).strip()
+            if not dn:
+                continue
+            decoded.append({"dn": dn, "type": obj_type})
+        return decoded
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -1411,7 +1530,7 @@ class MainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
 
-        self.table = QTableWidget()
+        self.table = DirectoryTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Name", "Type", "Description", "Distinguished Name"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1423,6 +1542,7 @@ class MainWindow(QMainWindow):
         self.table.cellDoubleClicked.connect(self.on_table_double_clicked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
+        self.table.group_membership_drop.connect(self.on_group_membership_drop)
 
         self.apply_saved_main_table_widths()
 
@@ -1961,6 +2081,55 @@ class MainWindow(QMainWindow):
                 self.show_error("Unlock account failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
+
+    def on_group_membership_drop(self, group_obj: LdapObject, payload: list[dict[str, str]]) -> None:
+        candidate_dns: list[str] = []
+        for entry in payload:
+            entry_type = str(entry.get("type", ""))
+            if entry_type not in {"User", "Computer", "Group"}:
+                continue
+            dn = str(entry.get("dn", "")).strip()
+            if not dn or dn == group_obj.dn:
+                continue
+            candidate_dns.append(dn)
+
+        if not candidate_dns:
+            QMessageBox.information(
+                self,
+                "No valid objects",
+                "Drag users, computers, or groups onto a group to add membership.",
+            )
+            return
+
+        unique_dns = list(dict.fromkeys(candidate_dns))
+        added_count = 0
+        skipped_count = 0
+        failed: list[str] = []
+
+        for member_dn in unique_dns:
+            try:
+                self.ldap.add_group_member(group_obj.dn, member_dn)
+                added_count += 1
+            except Exception as e:
+                if "entryAlreadyExists" in str(e):
+                    skipped_count += 1
+                else:
+                    failed.append(f"{member_dn}: {e}")
+
+        if failed:
+            self.show_error(
+                "Add group members failed",
+                "\n".join(failed),
+            )
+
+        QMessageBox.information(
+            self,
+            "Group membership updated",
+            f"Group: {group_obj.name}\nAdded: {added_count}\nAlready members: {skipped_count}",
+        )
+
+        if self.current_dn:
+            self.populate_main_pane(self.current_dn, add_history=False)
 
     def on_tree_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         data = item.data(0, Qt.UserRole) or {}
