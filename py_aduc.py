@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -60,6 +60,66 @@ CONTAINER_CLASSES = {
 USER_CLASSES = {"user", "person", "organizationalPerson"}
 GROUP_CLASSES = {"group"}
 COMPUTER_CLASSES = {"computer"}
+
+
+def build_aduc_ou_icon(size: int = 16) -> QIcon:
+    """Create a Windows ADUC-style OU icon (yellow folder + blue object card)."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, False)
+
+    scale = max(1, size // 16)
+
+    folder_tab_rect = (1 * scale, 2 * scale, 6 * scale, 3 * scale)
+    folder_body_rect = (1 * scale, 4 * scale, 14 * scale, 10 * scale)
+    card_rect = (8 * scale, 7 * scale, 7 * scale, 7 * scale)
+
+    folder_border = QColor("#9A6900")
+    folder_fill = QColor("#F7CF5A")
+    folder_tab_fill = QColor("#FCE08E")
+    card_border = QColor("#2E5590")
+    card_fill = QColor("#BBD6FF")
+
+    painter.setPen(QPen(folder_border, 1))
+    painter.setBrush(QBrush(folder_tab_fill))
+    painter.drawRect(*folder_tab_rect)
+
+    painter.setBrush(QBrush(folder_fill))
+    painter.drawRect(*folder_body_rect)
+
+    painter.setPen(QPen(card_border, 1))
+    painter.setBrush(QBrush(card_fill))
+    painter.drawRect(*card_rect)
+
+    painter.setPen(QPen(card_border, 1))
+    line_y = card_rect[1] + 2 * scale
+    for _ in range(3):
+        painter.drawLine(card_rect[0] + 1 * scale, line_y, card_rect[0] + card_rect[2] - 2 * scale, line_y)
+        line_y += 2 * scale
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
+    if obj.object_type == "Organizational Unit":
+        return build_aduc_ou_icon()
+    if obj.object_type in {"Container", "Domain"}:
+        icon = QIcon.fromTheme("folder")
+        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
+    if obj.object_type == "User":
+        icon = QIcon.fromTheme("user-identity")
+        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+    if obj.object_type == "Group":
+        icon = QIcon.fromTheme("system-users")
+        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
+    if obj.object_type == "Computer":
+        icon = QIcon.fromTheme("computer")
+        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_ComputerIcon)
+    icon = QIcon.fromTheme("text-x-generic")
+    return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
 
 
 @dataclass
@@ -796,15 +856,7 @@ class SelectDirectoryObjectsDialog(QDialog):
         self.results.setRowCount(len(results))
         for row, obj in enumerate(results):
             name_item = QTableWidgetItem(obj.name)
-            if obj.object_type == "User":
-                icon = QIcon.fromTheme("user-identity")
-                name_item.setIcon(icon if not icon.isNull() else self.style().standardIcon(QStyle.SP_FileIcon))
-            elif obj.object_type == "Group":
-                icon = QIcon.fromTheme("system-users")
-                name_item.setIcon(icon if not icon.isNull() else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
-            elif obj.object_type == "Computer":
-                icon = QIcon.fromTheme("computer")
-                name_item.setIcon(icon if not icon.isNull() else self.style().standardIcon(QStyle.SP_ComputerIcon))
+            name_item.setIcon(icon_for_directory_object(self.style(), obj))
             name_item.setData(Qt.UserRole, obj)
             type_item = QTableWidgetItem(obj.object_type)
             dn_item = QTableWidgetItem(obj.dn)
@@ -920,24 +972,7 @@ class GroupPropertiesDialog(QDialog):
         self.load_member_of()
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
-        style = self.style()
-        if obj.object_type == "Organizational Unit":
-            icon = QIcon.fromTheme("folder")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
-        if obj.object_type in {"Container", "Domain"}:
-            icon = QIcon.fromTheme("folder")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
-        if obj.object_type == "User":
-            icon = QIcon.fromTheme("user-identity")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
-        if obj.object_type == "Group":
-            icon = QIcon.fromTheme("system-users")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
-        if obj.object_type == "Computer":
-            icon = QIcon.fromTheme("computer")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_ComputerIcon)
-        icon = QIcon.fromTheme("text-x-generic")
-        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+        return icon_for_directory_object(self.style(), obj)
 
     def dn_to_canonical_name(self, dn: str) -> str:
         parts = [part.strip() for part in dn.split(",") if part.strip()]
@@ -1099,24 +1134,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.auto_connect_if_configured)
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
-        style = self.style()
-        if obj.object_type == "Organizational Unit":
-            icon = QIcon.fromTheme("folder")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
-        if obj.object_type in {"Container", "Domain"}:
-            icon = QIcon.fromTheme("folder")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
-        if obj.object_type == "User":
-            icon = QIcon.fromTheme("user-identity")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
-        if obj.object_type == "Group":
-            icon = QIcon.fromTheme("system-users")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
-        if obj.object_type == "Computer":
-            icon = QIcon.fromTheme("computer")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_ComputerIcon)
-        icon = QIcon.fromTheme("text-x-generic")
-        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+        return icon_for_directory_object(self.style(), obj)
 
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
