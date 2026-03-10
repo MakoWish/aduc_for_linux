@@ -13,6 +13,7 @@ Migrating away from Windows while still working in a Microsoft environment has p
 
 `~/.local/share/applications/aduc_for_linux.desktop`
 ```
+[Desktop Entry]
 Name=ADUC for Linux
 Exec=/path/to/aduc_for_linux.py
 Icon=/path/to/app_icon.png
