@@ -639,6 +639,9 @@ class OptionsDialog(QDialog):
         if idx >= 0:
             self.auth_mode_combo.setCurrentIndex(idx)
 
+        self.auth_mode_combo.currentIndexChanged.connect(self.update_auto_connect_state)
+        self.update_auto_connect_state()
+
         form = QFormLayout()
         form.addRow("Authentication:", self.auth_mode_combo)
         form.addRow("Auto-connect on launch:", self.auto_connect_combo)
@@ -655,7 +658,15 @@ class OptionsDialog(QDialog):
         return str(self.auth_mode_combo.currentData())
 
     def selected_auto_connect(self) -> bool:
+        if self.selected_auth_mode() == "credentials":
+            return False
         return bool(self.auto_connect_combo.currentData())
+
+    def update_auto_connect_state(self) -> None:
+        using_credentials = self.selected_auth_mode() == "credentials"
+        if using_credentials:
+            self.auto_connect_combo.setCurrentIndex(0)
+        self.auto_connect_combo.setEnabled(not using_credentials)
 
 
 class PropertiesDialog(QDialog):
