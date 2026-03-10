@@ -446,14 +446,13 @@ class LdapManager:
 
     @staticmethod
     def _display_name(entry, object_classes: list[str], fallback: str) -> str:
-        if "computer" in object_classes and "dNSHostName" in entry:
+        if "computer" in object_classes and "cn" in entry:
             try:
-                dns_name = str(entry.dNSHostName).strip()
+                cn = str(entry.cn).strip()
             except Exception:
-                dns_name = ""
-            if dns_name:
-                # Keep computer names short (non-FQDN) while preserving full DNS label length.
-                return dns_name.split(".", 1)[0]
+                cn = ""
+            if cn:
+                return cn
         return str(entry.name) if "name" in entry else fallback
 
     def list_children(self, base_dn: str) -> list[LdapObject]:
@@ -467,7 +466,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
-                "dNSHostName",
+                "cn",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -567,7 +566,7 @@ class LdapManager:
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=["distinguishedName", "name", "cn", "objectClass", "description"],
             size_limit=size_limit,
         )
 
@@ -756,7 +755,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
-                "dNSHostName",
+                "cn",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -899,7 +898,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
-                "dNSHostName",
+                "cn",
                 "objectClass",
                 "description",
                 "userAccountControl",
