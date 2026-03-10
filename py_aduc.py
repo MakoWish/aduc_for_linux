@@ -448,9 +448,11 @@ class LdapManager:
     def _display_name(entry, object_classes: list[str], fallback: str) -> str:
         if "computer" in object_classes and "cn" in entry:
             try:
-                cn = str(entry.cn).strip()
+                cn_values = entry.cn.values
+                cn = str(cn_values[0]) if isinstance(cn_values, list) and cn_values else str(cn_values)
             except Exception:
                 cn = ""
+            cn = cn.replace("\r", " ").replace("\n", " ").strip()
             if cn:
                 return cn
         return str(entry.name) if "name" in entry else fallback
@@ -1710,7 +1712,6 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
 
-        self.table.resizeColumnToContents(0)
 
     def run_search(self, base_dn: str, term: str) -> None:
         if not term:
