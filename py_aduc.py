@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QAbstractItemView,
     QFormLayout,
+    QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -111,7 +113,8 @@ def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
         return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
     if obj.object_type == "User":
         icon = QIcon.fromTheme("user-identity")
-        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+        base_icon = icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+        return add_user_state_overlays(base_icon, obj)
     if obj.object_type == "Group":
         icon = QIcon.fromTheme("system-users")
         return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
@@ -122,12 +125,46 @@ def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
     return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
 
 
+def add_user_state_overlays(base_icon: QIcon, obj: "LdapObject", size: int = 16) -> QIcon:
+    """Overlay state badges onto user icons (disabled / locked)."""
+    if not (obj.user_disabled or obj.user_locked):
+        return base_icon
+
+    pixmap = base_icon.pixmap(size, size)
+    if pixmap.isNull():
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    if obj.user_disabled:
+        painter.setPen(QPen(QColor("#B71C1C"), 2))
+        painter.setBrush(QBrush(QColor("#FDECEC")))
+        painter.drawEllipse(1, size - 8, 7, 7)
+        painter.drawLine(2, size - 2, 7, size - 7)
+
+    if obj.user_locked:
+        lock_body = QColor("#D6A200")
+        lock_outline = QColor("#7A5D00")
+        painter.setPen(QPen(lock_outline, 1))
+        painter.setBrush(QBrush(lock_body))
+        painter.drawRect(size - 7, size - 7, 6, 5)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawArc(size - 7, size - 10, 6, 6, 35 * 16, 110 * 16)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 @dataclass
 class LdapObject:
     dn: str
     name: str
     object_classes: list[str]
     description: str = ""
+    user_disabled: bool = False
+    user_locked: bool = False
 
     @property
     def is_container(self) -> bool:
@@ -213,7 +250,15 @@ class LdapManager:
             search_base=base_dn,
             search_filter="(objectClass=*)",
             search_scope=LEVEL,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=[
+                "distinguishedName",
+                "name",
+                "dNSHostName",
+                "objectClass",
+                "description",
+                "userAccountControl",
+                "lockoutTime",
+            ],
         )
 
         results: list[LdapObject] = []
@@ -245,6 +290,8 @@ class LdapManager:
                     name=name,
                     object_classes=object_classes,
                     description=description,
+                    user_disabled=self._is_user_disabled(entry, object_classes),
+                    user_locked=self._is_user_locked(entry, object_classes),
                 )
             )
 
@@ -375,6 +422,30 @@ class LdapManager:
         except Exception:
             return None
 
+    @staticmethod
+    def _is_user_disabled(entry, object_classes: list[str]) -> bool:
+        if "user" not in object_classes or "computer" in object_classes:
+            return False
+        if "userAccountControl" not in entry:
+            return False
+        try:
+            value = int(str(entry.userAccountControl))
+        except Exception:
+            return False
+        return bool(value & 0x0002)
+
+    @staticmethod
+    def _is_user_locked(entry, object_classes: list[str]) -> bool:
+        if "user" not in object_classes or "computer" in object_classes:
+            return False
+        if "lockoutTime" not in entry:
+            return False
+        try:
+            value = int(str(entry.lockoutTime))
+        except Exception:
+            return False
+        return value > 0
+
     def set_user_enabled(self, dn: str, enabled: bool) -> None:
         if not self.conn:
             return
@@ -447,7 +518,15 @@ class LdapManager:
             search_base=dn,
             search_filter="(objectClass=*)",
             search_scope=BASE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=[
+                "distinguishedName",
+                "name",
+                "dNSHostName",
+                "objectClass",
+                "description",
+                "userAccountControl",
+                "lockoutTime",
+            ],
         )
         if not self.conn.entries:
             return None
@@ -479,6 +558,8 @@ class LdapManager:
             name=name,
             object_classes=object_classes,
             description=description,
+            user_disabled=self._is_user_disabled(entry, object_classes),
+            user_locked=self._is_user_locked(entry, object_classes),
         )
 
     def get_group_members(self, group_dn: str) -> list[LdapObject]:
@@ -585,7 +666,16 @@ class LdapManager:
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            # Needed for user icon overlays.
+            attributes=[
+                "distinguishedName",
+                "name",
+                "dNSHostName",
+                "objectClass",
+                "description",
+                "userAccountControl",
+                "lockoutTime",
+            ],
             size_limit=size_limit,
         )
 
@@ -619,6 +709,8 @@ class LdapManager:
                     name=name,
                     object_classes=object_classes,
                     description=description,
+                    user_disabled=self._is_user_disabled(entry, object_classes),
+                    user_locked=self._is_user_locked(entry, object_classes),
                 )
             )
 
