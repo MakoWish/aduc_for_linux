@@ -20,6 +20,7 @@ It is intentionally small and focused: one Python app, one installer script, and
   - Organizational Units
 - Basic ADUC-like iconography and object-state overlays.
 - Desktop launcher installation for user-only or system-wide installs.
+- Startup version check against GitHub with update prompt when a newer release is available.
 
 ## Requirements
 
@@ -48,6 +49,7 @@ The installer will:
 2. Create a virtual environment.
 3. Install Python dependencies.
 4. Create a `.desktop` launcher entry.
+5. Install a local `VERSION` file used by the app startup update check.
 
 ## Running manually (without launcher)
 

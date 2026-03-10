@@ -5,6 +5,9 @@ import json
 import os
 import ssl
 import sys
+import urllib.error
+import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
@@ -52,6 +55,9 @@ TEST_BIND_PASSWORD = ""
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "aduc-linux")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
+VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+REMOTE_VERSION_URL = "https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/VERSION"
+UPDATE_COMMAND = "bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/install.sh)"
 
 CONTAINER_CLASSES = {
     "domain",
@@ -73,6 +79,47 @@ SEARCH_FILTER_OPTIONS = [
     ("Computers", SEARCH_FILTER_COMPUTERS),
     ("Organizational Units", SEARCH_FILTER_ORGANIZATIONAL_UNITS),
 ]
+
+
+def parse_version(version: str) -> tuple[int, ...]:
+    normalized = version.strip().lstrip("vV")
+    parts = []
+    for chunk in normalized.split("."):
+        digits = ""
+        for char in chunk:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+
+def is_newer_version(current_version: str, remote_version: str) -> bool:
+    current_parts = parse_version(current_version)
+    remote_parts = parse_version(remote_version)
+    width = max(len(current_parts), len(remote_parts))
+    current_padded = current_parts + (0,) * (width - len(current_parts))
+    remote_padded = remote_parts + (0,) * (width - len(remote_parts))
+    return remote_padded > current_padded
+
+
+def read_local_version() -> str:
+    try:
+        with open(VERSION_FILE, "r", encoding="utf-8") as handle:
+            version = handle.read().strip()
+            return version or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+def fetch_remote_version(timeout: float = 3.0) -> Optional[str]:
+    try:
+        with urllib.request.urlopen(REMOTE_VERSION_URL, timeout=timeout) as response:
+            payload = response.read().decode("utf-8").strip()
+            return payload or None
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
 
 
 def build_aduc_ou_icon(has_child_ou: bool, size: int = 16) -> QIcon:
@@ -2656,9 +2703,32 @@ class MainWindow(QMainWindow):
             self.load_tree_children(tree_item)
 
 
+def prompt_for_update_if_available() -> None:
+    current_version = read_local_version()
+    remote_version = fetch_remote_version()
+    if not remote_version or not is_newer_version(current_version, remote_version):
+        return
+
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Information)
+    box.setWindowTitle("Update available")
+    box.setText(f"A newer version is available: {remote_version} (installed: {current_version}).")
+    box.setInformativeText(
+        "Would you like to open update instructions now?\n\n"
+        f"Run this command in a terminal:\n{UPDATE_COMMAND}"
+    )
+    open_button = box.addButton("Open GitHub", QMessageBox.AcceptRole)
+    box.addButton(QMessageBox.Close)
+    box.exec()
+
+    if box.clickedButton() is open_button:
+        webbrowser.open("https://github.com/MakoWish/aduc_for_linux")
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(build_application_icon())
+    prompt_for_update_if_available()
     win = MainWindow()
     win.show()
     return app.exec()
