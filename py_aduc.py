@@ -55,11 +55,11 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 CONTAINER_CLASSES = {
     "domain",
     "container",
-    "organizationalUnit",
-    "builtinDomain",
+    "organizationalunit",
+    "builtindomain",
 }
 
-USER_CLASSES = {"user", "person", "organizationalPerson"}
+USER_CLASSES = {"user", "person", "organizationalperson"}
 GROUP_CLASSES = {"group"}
 COMPUTER_CLASSES = {"computer"}
 
@@ -268,7 +268,7 @@ class LdapObject:
             return "Group"
         if any(cls in classes for cls in USER_CLASSES) and "computer" not in classes:
             return "User"
-        if "organizationalUnit" in classes:
+        if "organizationalunit" in classes:
             return "Organizational Unit"
         if "container" in classes:
             return "Container"
@@ -353,7 +353,7 @@ class LdapManager:
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
-            object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+            object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             if "computer" in object_classes and "dNSHostName" in entry:
                 try:
                     dns_name = str(entry.dNSHostName)
@@ -455,7 +455,7 @@ class LdapManager:
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
-            object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+            object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             if "computer" in object_classes and "dNSHostName" in entry:
                 try:
                     dns_name = str(entry.dNSHostName)
@@ -643,7 +643,7 @@ class LdapManager:
             return None
 
         entry = self.conn.entries[0]
-        object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+        object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
         if "computer" in object_classes and "dNSHostName" in entry:
             try:
                 dns_name = str(entry.dNSHostName)
@@ -793,7 +793,7 @@ class LdapManager:
         results: list[LdapObject] = []
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
-            object_classes = [str(x) for x in entry.objectClass.values] if "objectClass" in entry else []
+            object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             if "computer" in object_classes and "dNSHostName" in entry:
                 try:
                     dns_name = str(entry.dNSHostName)
