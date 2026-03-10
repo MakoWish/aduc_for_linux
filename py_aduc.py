@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
+import os
 import ssl
 import sys
 from dataclasses import dataclass
@@ -10,12 +12,12 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QMenu,
     QDialog,
     QDialogButtonBox,
     QAbstractItemView,
     QFormLayout,
-    QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
@@ -24,7 +26,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPushButton,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -37,13 +38,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, Connection, Server, Tls
+from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, Connection, Server, Tls
 
 
 # Hard-coded values used only during development
 TEST_DC = ""
 TEST_BIND_USER = ""
 TEST_BIND_PASSWORD = ""
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "aduc-linux")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 
 CONTAINER_CLASSES = {
     "domain",
@@ -98,6 +102,17 @@ class LdapManager:
             self.server,
             user=bind_user,
             password=password,
+            auto_bind=True,
+            raise_exceptions=True,
+        )
+
+    def connect_kerberos(self, host: str, port: int = 636) -> None:
+        tls = Tls(validate=ssl.CERT_REQUIRED)
+        self.server = Server(host, port=port, use_ssl=True, get_info=ALL, tls=tls)
+        self.conn = Connection(
+            self.server,
+            authentication=SASL,
+            sasl_mechanism="GSSAPI",
             auto_bind=True,
             raise_exceptions=True,
         )
@@ -551,16 +566,19 @@ class LdapManager:
 
 
 class ConnectDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, auth_mode: str, saved_host: str = "", saved_port: int = 636, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Connect to Active Directory")
+        self.auth_mode = auth_mode
 
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("dc01.example.com")
-        if TEST_DC:
+        if saved_host:
+            self.host_edit.setText(saved_host)
+        elif TEST_DC:
             self.host_edit.setText(TEST_DC)
 
-        self.port_edit = QLineEdit("636")
+        self.port_edit = QLineEdit(str(saved_port))
 
         self.bind_user_edit = QLineEdit()
         self.bind_user_edit.setPlaceholderText("admin@example.com or EXAMPLE\\admin")
@@ -571,6 +589,18 @@ class ConnectDialog(QDialog):
         self.password_edit.setEchoMode(QLineEdit.Password)
         if TEST_BIND_PASSWORD:
             self.password_edit.setText(TEST_BIND_PASSWORD)
+
+        if self.auth_mode == "kerberos":
+            self.bind_user_edit.setEnabled(False)
+            self.password_edit.setEnabled(False)
+            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
+            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
+
+        if self.auth_mode == "kerberos":
+            self.bind_user_edit.setEnabled(False)
+            self.password_edit.setEnabled(False)
+            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
+            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
 
         form = QFormLayout()
         form.addRow("Server:", self.host_edit)
@@ -593,6 +623,45 @@ class ConnectDialog(QDialog):
             self.bind_user_edit.text().strip(),
             self.password_edit.text(),
         )
+
+
+class OptionsDialog(QDialog):
+    def __init__(self, auth_mode: str, auto_connect: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Options")
+
+        self.auth_mode_combo = QComboBox()
+        self.auth_mode_combo.addItem("Credentials", "credentials")
+        self.auth_mode_combo.addItem("Kerberos / SSO", "kerberos")
+        if auth_mode == "kerberos":
+            self.auth_mode_combo.setCurrentIndex(1)
+
+        self.auto_connect_combo = QComboBox()
+        self.auto_connect_combo.addItem("Disabled", False)
+        self.auto_connect_combo.addItem("Enabled", True)
+        self.auto_connect_combo.setCurrentIndex(1 if auto_connect else 0)
+
+        idx = self.auth_mode_combo.findData(auth_mode)
+        if idx >= 0:
+            self.auth_mode_combo.setCurrentIndex(idx)
+
+        form = QFormLayout()
+        form.addRow("Authentication:", self.auth_mode_combo)
+        form.addRow("Auto-connect on launch:", self.auto_connect_combo)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def selected_auth_mode(self) -> str:
+        return str(self.auth_mode_combo.currentData())
+
+    def selected_auto_connect(self) -> bool:
+        return bool(self.auto_connect_combo.currentData())
 
 
 class PropertiesDialog(QDialog):
@@ -957,8 +1026,12 @@ class MainWindow(QMainWindow):
         self.resize(1400, 800)
 
         self.ldap = LdapManager()
+        self.auth_mode = "credentials"
+        self.saved_host = ""
+        self.saved_port = 636
+        self.auto_connect = False
         self.current_dn: Optional[str] = None
-        self.history: list[str] = []
+        self.load_settings()
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Active Directory")
@@ -992,38 +1065,50 @@ class MainWindow(QMainWindow):
         central = QWidget()
         root_layout = QVBoxLayout(central)
 
-        toolbar_row = QHBoxLayout()
-
-        self.status_label = QLabel("Not connected")
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search name, display name, sAMAccountName, description...")
-        self.search_edit.returnPressed.connect(self.run_search)
-
-        self.search_btn = QPushButton("Search")
-        self.search_btn.clicked.connect(self.run_search)
-
-        self.back_btn = QPushButton("Back")
-        self.back_btn.clicked.connect(self.go_back)
-        self.back_btn.setEnabled(False)
-
-        self.connect_btn = QPushButton("Connect")
-        self.connect_btn.clicked.connect(self.show_connect_dialog)
-
-        toolbar_row.addWidget(self.status_label)
-        toolbar_row.addStretch()
-        toolbar_row.addWidget(self.search_edit)
-        toolbar_row.addWidget(self.search_btn)
-        toolbar_row.addWidget(self.back_btn)
-        toolbar_row.addWidget(self.connect_btn)
-
-        root_layout.addLayout(toolbar_row)
         root_layout.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
 
+        file_menu = self.menuBar().addMenu("File")
+
+        connect_action = QAction("Connect", self)
+        connect_action.triggered.connect(self.show_connect_dialog)
+        file_menu.addAction(connect_action)
+
         refresh_action = QAction("Refresh", self)
         refresh_action.triggered.connect(self.refresh_current)
-        self.menuBar().addAction(refresh_action)
+        file_menu.addAction(refresh_action)
+
+        options_action = QAction("Options", self)
+        options_action.triggered.connect(self.show_options_dialog)
+        file_menu.addAction(options_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        if self.auto_connect and self.saved_host:
+            QTimer.singleShot(0, self.auto_connect_if_configured)
+
+        connect_action = QAction("Connect", self)
+        connect_action.triggered.connect(self.show_connect_dialog)
+        file_menu.addAction(connect_action)
+
+        refresh_action = QAction("Refresh", self)
+        refresh_action.triggered.connect(self.refresh_current)
+        file_menu.addAction(refresh_action)
+
+        options_action = QAction("Options", self)
+        options_action.triggered.connect(self.show_options_dialog)
+        file_menu.addAction(options_action)
+
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
         style = self.style()
@@ -1048,28 +1133,83 @@ class MainWindow(QMainWindow):
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
 
+    def show_options_dialog(self) -> None:
+        dlg = OptionsDialog(self.auth_mode, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.auth_mode = dlg.selected_auth_mode()
+
+    def load_settings(self) -> None:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+
+        self.auth_mode = str(data.get("auth_mode", "credentials"))
+        self.saved_host = str(data.get("host", ""))
+        self.saved_port = int(data.get("port", 636))
+        self.auto_connect = bool(data.get("auto_connect", False))
+
+    def save_settings(self) -> None:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        data = {
+            "auth_mode": self.auth_mode,
+            "host": self.saved_host,
+            "port": self.saved_port,
+            "auto_connect": self.auto_connect,
+        }
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def auto_connect_if_configured(self) -> None:
+        try:
+            if self.auth_mode == "kerberos":
+                self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
+            else:
+                return
+        except Exception as e:
+            self.show_error("Auto-connect failed", str(e))
+            return
+
+        self.populate_roots()
+
+    def show_options_dialog(self) -> None:
+        dlg = OptionsDialog(self.auth_mode, self.auto_connect, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        self.auth_mode = dlg.selected_auth_mode()
+        self.auto_connect = dlg.selected_auto_connect()
+        self.save_settings()
+
     def show_connect_dialog(self) -> None:
-        dlg = ConnectDialog(self)
+        dlg = ConnectDialog(self.auth_mode, self.saved_host, self.saved_port, self)
         if dlg.exec() != QDialog.Accepted:
             return
 
         host, port, bind_user, password = dlg.values()
 
         try:
-            self.ldap.connect_simple(host, bind_user, password, port=port)
+            if self.auth_mode == "kerberos":
+                self.ldap.connect_kerberos(host, port=port)
+            else:
+                self.ldap.connect_simple(host, bind_user, password, port=port)
         except Exception as e:
             self.show_error("Connection failed", str(e))
             return
 
-        self.status_label.setText(f"Connected to {host}:{port} as {bind_user}")
+        self.saved_host = host
+        self.saved_port = port
+        self.save_settings()
         self.populate_roots()
 
     def populate_roots(self) -> None:
         self.tree.clear()
         self.table.setRowCount(0)
         self.current_dn = None
-        self.history.clear()
-        self.back_btn.setEnabled(False)
 
         try:
             contexts = self.ldap.get_naming_contexts()
@@ -1124,11 +1264,7 @@ class MainWindow(QMainWindow):
             self.show_error("List failed", str(e))
             return
 
-        if add_history and self.current_dn and self.current_dn != dn:
-            self.history.append(self.current_dn)
-
         self.current_dn = dn
-        self.back_btn.setEnabled(bool(self.history))
 
         self.table.setRowCount(len(children))
 
@@ -1163,20 +1299,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
 
-    def run_search(self) -> None:
-        term = self.search_edit.text().strip()
+    def run_search(self, base_dn: str, term: str) -> None:
         if not term:
-            return
-
-        base_dn = self.current_dn
-        if not base_dn:
-            top = self.tree.topLevelItem(0)
-            if not top:
-                return
-            data = top.data(0, Qt.UserRole) or {}
-            base_dn = data.get("dn")
-
-        if not base_dn:
             return
 
         try:
@@ -1264,6 +1388,7 @@ class MainWindow(QMainWindow):
 
         properties_action = menu.addAction("Properties")
         refresh_action = menu.addAction("Refresh")
+        search_action = menu.addAction("Search...")
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
         expand_action = None
@@ -1285,6 +1410,10 @@ class MainWindow(QMainWindow):
                     item.takeChild(0)
                 self.load_tree_children(item)
                 self.populate_main_pane(obj.dn, add_history=False)
+        elif chosen == search_action:
+            term, ok = QInputDialog.getText(self, "Search", f"Search under:\n{obj.dn}\n\nFind:")
+            if ok:
+                self.run_search(obj.dn, term.strip())
         elif chosen == copy_dn_action:
             self.copy_text_to_clipboard(obj.dn)
         elif expand_action is not None and chosen == expand_action:
@@ -1448,17 +1577,6 @@ class MainWindow(QMainWindow):
             if found:
                 return found
         return None
-
-    def go_back(self) -> None:
-        if not self.history:
-            return
-        previous_dn = self.history.pop()
-        self.back_btn.setEnabled(bool(self.history))
-        self.populate_main_pane(previous_dn, add_history=False)
-
-        tree_item = self.find_tree_item_by_dn(previous_dn)
-        if tree_item:
-            self.tree.setCurrentItem(tree_item)
 
     def refresh_current(self) -> None:
         if not self.current_dn:
