@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -1120,6 +1121,20 @@ class MainWindow(QMainWindow):
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
 
+    def run_with_loading(self, message: str, action) -> None:
+        loading = QProgressDialog(message, None, 0, 0, self)
+        loading.setWindowTitle("Please wait")
+        loading.setWindowModality(Qt.ApplicationModal)
+        loading.setCancelButton(None)
+        loading.setMinimumDuration(0)
+        loading.show()
+        QApplication.processEvents()
+
+        try:
+            action()
+        finally:
+            loading.close()
+
     def show_options_dialog(self) -> None:
         dlg = OptionsDialog(self.auth_mode, self)
         if dlg.exec() != QDialog.Accepted:
@@ -1152,16 +1167,19 @@ class MainWindow(QMainWindow):
             json.dump(data, f, indent=2)
 
     def auto_connect_if_configured(self) -> None:
+        if self.auth_mode != "kerberos":
+            return
+
         try:
-            if self.auth_mode == "kerberos":
+            def connect_and_load() -> None:
                 self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
-            else:
-                return
+
+                self.populate_roots()
+
+            self.run_with_loading("Auto-connecting to Active Directory...", connect_and_load)
         except Exception as e:
             self.show_error("Auto-connect failed", str(e))
             return
-
-        self.populate_roots()
 
     def show_options_dialog(self) -> None:
         dlg = OptionsDialog(self.auth_mode, self.auto_connect, self)
