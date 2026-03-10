@@ -114,6 +114,34 @@ def build_aduc_ou_icon(has_child_ou: bool, size: int = 16) -> QIcon:
     return QIcon(pixmap)
 
 
+def build_aduc_container_icon(size: int = 16) -> QIcon:
+    """Create an ADUC-like plain folder icon for generic containers."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, False)
+
+    scale = max(1, size // 16)
+
+    folder_tab_rect = (1 * scale, 2 * scale, 7 * scale, 3 * scale)
+    folder_body_rect = (1 * scale, 4 * scale, 14 * scale, 10 * scale)
+
+    folder_border = QColor("#9A6900")
+    folder_fill = QColor("#F7CF5A")
+    folder_tab_fill = QColor("#FCE08E")
+
+    painter.setPen(QPen(folder_border, 1))
+    painter.setBrush(QBrush(folder_tab_fill))
+    painter.drawRect(*folder_tab_rect)
+
+    painter.setBrush(QBrush(folder_fill))
+    painter.drawRect(*folder_body_rect)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 def build_aduc_user_icon(size: int = 16) -> QIcon:
     """Create an ADUC-like user icon (person over blue account card)."""
     pixmap = QPixmap(size, size)
@@ -200,8 +228,7 @@ def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
     if obj.object_type == "Organizational Unit":
         return build_aduc_ou_icon(has_child_ou=obj.has_child_ou)
     if obj.object_type in {"Container", "Domain"}:
-        icon = QIcon.fromTheme("folder")
-        return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
+        return build_aduc_container_icon()
     if obj.object_type == "User":
         base_icon = build_aduc_user_icon()
         return add_user_state_overlays(base_icon, obj)
@@ -493,7 +520,7 @@ class LdapManager:
             return
 
         for obj in objects:
-            if "organizationalUnit" not in obj.object_classes:
+            if "organizationalunit" not in obj.object_classes:
                 continue
 
             try:
