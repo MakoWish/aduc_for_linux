@@ -1052,6 +1052,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Name", "Type", "Description", "Distinguished Name"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSortingEnabled(False)
         self.table.verticalHeader().setVisible(False)
@@ -1431,21 +1432,36 @@ class MainWindow(QMainWindow):
             return
 
         row = item.row()
-        name_item = self.table.item(row, 0)
-        if not name_item:
+        self.table.selectRow(row)
+
+        selected_rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
+        selected_objects: list[LdapObject] = []
+        for selected_row in selected_rows:
+            selected_name_item = self.table.item(selected_row, 0)
+            if not selected_name_item:
+                continue
+            selected_obj = selected_name_item.data(Qt.UserRole)
+            if isinstance(selected_obj, LdapObject):
+                selected_objects.append(selected_obj)
+
+        if not selected_objects:
             return
 
-        obj = name_item.data(Qt.UserRole)
-        if not isinstance(obj, LdapObject):
+        is_single = len(selected_objects) == 1
+        obj = selected_objects[0]
+        name_item = self.table.item(row, 0)
+        if not name_item:
             return
 
         menu = QMenu(self)
 
         properties_action = menu.addAction("Properties")
+        properties_action.setEnabled(is_single)
+
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
         open_action = None
-        if obj.is_container:
+        if is_single and obj.is_container:
             open_action = menu.addAction("Open")
 
         enable_action = None
@@ -1454,14 +1470,16 @@ class MainWindow(QMainWindow):
         add_to_group_action = None
         remove_from_group_action = None
         reset_password_action = None
-        if obj.object_type == "User":
+        selected_users = [o for o in selected_objects if o.object_type == "User"]
+        if selected_users:
             menu.addSeparator()
-            reset_password_action = menu.addAction("Reset Password")
+            if len(selected_users) == 1 and is_single:
+                reset_password_action = menu.addAction("Reset Password")
             enable_action = menu.addAction("Enable Account")
             disable_action = menu.addAction("Disable Account")
             unlock_action = menu.addAction("Unlock Account")
 
-        if obj.object_type in {"User", "Computer"}:
+        if is_single and obj.object_type in {"User", "Computer"}:
             menu.addSeparator()
             add_to_group_action = menu.addAction("Add to Group...")
             remove_from_group_action = menu.addAction("Remove from Group...")
@@ -1473,7 +1491,8 @@ class MainWindow(QMainWindow):
         if chosen == properties_action:
             self.open_properties(obj)
         elif chosen == copy_dn_action:
-            self.copy_text_to_clipboard(obj.dn)
+            dns = [selected_obj.dn for selected_obj in selected_objects]
+            self.copy_text_to_clipboard("\n".join(dns))
         elif open_action is not None and chosen == open_action:
             self.populate_main_pane(obj.dn)
             tree_item = self.find_tree_item_by_dn(obj.dn)
@@ -1484,24 +1503,36 @@ class MainWindow(QMainWindow):
         elif reset_password_action is not None and chosen == reset_password_action:
             self.reset_password_for_object(obj)
         elif enable_action is not None and chosen == enable_action:
-            try:
-                self.ldap.set_user_enabled(obj.dn, True)
-            except Exception as e:
-                self.show_error("Enable account failed", str(e))
+            failed_dns: list[str] = []
+            for user_obj in selected_users:
+                try:
+                    self.ldap.set_user_enabled(user_obj.dn, True)
+                except Exception:
+                    failed_dns.append(user_obj.dn)
+            if failed_dns:
+                self.show_error("Enable account failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
         elif disable_action is not None and chosen == disable_action:
-            try:
-                self.ldap.set_user_enabled(obj.dn, False)
-            except Exception as e:
-                self.show_error("Disable account failed", str(e))
+            failed_dns: list[str] = []
+            for user_obj in selected_users:
+                try:
+                    self.ldap.set_user_enabled(user_obj.dn, False)
+                except Exception:
+                    failed_dns.append(user_obj.dn)
+            if failed_dns:
+                self.show_error("Disable account failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
         elif unlock_action is not None and chosen == unlock_action:
-            try:
-                self.ldap.unlock_account(obj.dn)
-            except Exception as e:
-                self.show_error("Unlock account failed", str(e))
+            failed_dns: list[str] = []
+            for user_obj in selected_users:
+                try:
+                    self.ldap.unlock_account(user_obj.dn)
+                except Exception:
+                    failed_dns.append(user_obj.dn)
+            if failed_dns:
+                self.show_error("Unlock account failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
         elif add_to_group_action is not None and chosen == add_to_group_action:
