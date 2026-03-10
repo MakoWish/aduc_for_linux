@@ -290,7 +290,8 @@ def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
     if obj.object_type == "Group":
         return build_aduc_group_icon()
     if obj.object_type == "Computer":
-        return build_aduc_computer_icon()
+        base_icon = build_aduc_computer_icon()
+        return add_computer_state_overlays(base_icon, obj)
     icon = QIcon.fromTheme("text-x-generic")
     return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
 
@@ -327,6 +328,35 @@ def add_user_state_overlays(base_icon: QIcon, obj: "LdapObject", size: int = 16)
     return QIcon(pixmap)
 
 
+def add_computer_state_overlays(base_icon: QIcon, obj: "LdapObject", size: int = 16) -> QIcon:
+    """Overlay state badges onto computer icons (disabled)."""
+    if not obj.computer_disabled:
+        return base_icon
+
+    pixmap = base_icon.pixmap(size, size)
+    if pixmap.isNull():
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+
+    badge_size = 8
+    badge_x = size - badge_size
+    badge_y = size - badge_size
+
+    painter.setPen(QPen(QColor("#B71C1C"), 1))
+    painter.setBrush(QBrush(QColor("#D32F2F")))
+    painter.drawEllipse(badge_x, badge_y, badge_size - 1, badge_size - 1)
+
+    painter.setPen(QPen(QColor("#FFFFFF"), 2))
+    painter.drawLine(badge_x + 2, badge_y + 2, badge_x + badge_size - 3, badge_y + badge_size - 3)
+    painter.drawLine(badge_x + badge_size - 3, badge_y + 2, badge_x + 2, badge_y + badge_size - 3)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 @dataclass
 class LdapObject:
     dn: str
@@ -335,6 +365,7 @@ class LdapObject:
     description: str = ""
     user_disabled: bool = False
     user_locked: bool = False
+    computer_disabled: bool = False
     has_child_ou: bool = False
 
     @property
@@ -413,6 +444,17 @@ class LdapManager:
 
         return contexts
 
+    @staticmethod
+    def _display_name(entry, object_classes: list[str], fallback: str) -> str:
+        if "computer" in object_classes and "cn" in entry:
+            try:
+                cn = str(entry.cn).strip()
+            except Exception:
+                cn = ""
+            if cn:
+                return cn
+        return str(entry.name) if "name" in entry else fallback
+
     def list_children(self, base_dn: str) -> list[LdapObject]:
         if not self.conn:
             return []
@@ -424,7 +466,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
-                "dNSHostName",
+                "cn",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -436,14 +478,7 @@ class LdapManager:
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-            if "computer" in object_classes and "dNSHostName" in entry:
-                try:
-                    dns_name = str(entry.dNSHostName)
-                except Exception:
-                    dns_name = ""
-                name = dns_name or (str(entry.name) if "name" in entry else dn)
-            else:
-                name = str(entry.name) if "name" in entry else dn
+            name = self._display_name(entry, object_classes, dn)
             description = ""
             if "description" in entry:
                 try:
@@ -463,6 +498,7 @@ class LdapManager:
                     description=description,
                     user_disabled=self._is_user_disabled(entry, object_classes),
                     user_locked=self._is_user_locked(entry, object_classes),
+                    computer_disabled=self._is_computer_disabled(entry, object_classes),
                 )
             )
 
@@ -530,7 +566,7 @@ class LdapManager:
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=["distinguishedName", "name", "cn", "objectClass", "description"],
             size_limit=size_limit,
         )
 
@@ -538,14 +574,7 @@ class LdapManager:
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-            if "computer" in object_classes and "dNSHostName" in entry:
-                try:
-                    dns_name = str(entry.dNSHostName)
-                except Exception:
-                    dns_name = ""
-                name = dns_name or (str(entry.name) if "name" in entry else dn)
-            else:
-                name = str(entry.name) if "name" in entry else dn
+            name = self._display_name(entry, object_classes, dn)
             description = ""
             if "description" in entry:
                 try:
@@ -639,6 +668,18 @@ class LdapManager:
             return False
         return value > 0
 
+    @staticmethod
+    def _is_computer_disabled(entry, object_classes: list[str]) -> bool:
+        if "computer" not in object_classes:
+            return False
+        if "userAccountControl" not in entry:
+            return False
+        try:
+            value = int(str(entry.userAccountControl))
+        except Exception:
+            return False
+        return bool(value & 0x0002)
+
     def set_user_enabled(self, dn: str, enabled: bool) -> None:
         if not self.conn:
             return
@@ -714,7 +755,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
-                "dNSHostName",
+                "cn",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -726,14 +767,7 @@ class LdapManager:
 
         entry = self.conn.entries[0]
         object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-        if "computer" in object_classes and "dNSHostName" in entry:
-            try:
-                dns_name = str(entry.dNSHostName)
-            except Exception:
-                dns_name = ""
-            name = dns_name or (str(entry.name) if "name" in entry else dn)
-        else:
-            name = str(entry.name) if "name" in entry else dn
+        name = self._display_name(entry, object_classes, dn)
 
         description = ""
         if "description" in entry:
@@ -753,6 +787,7 @@ class LdapManager:
             description=description,
             user_disabled=self._is_user_disabled(entry, object_classes),
             user_locked=self._is_user_locked(entry, object_classes),
+            computer_disabled=self._is_computer_disabled(entry, object_classes),
         )
 
     def get_group_members(self, group_dn: str) -> list[LdapObject]:
@@ -863,7 +898,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
-                "dNSHostName",
+                "cn",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -876,14 +911,7 @@ class LdapManager:
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-            if "computer" in object_classes and "dNSHostName" in entry:
-                try:
-                    dns_name = str(entry.dNSHostName)
-                except Exception:
-                    dns_name = ""
-                name = dns_name or (str(entry.name) if "name" in entry else dn)
-            else:
-                name = str(entry.name) if "name" in entry else dn
+            name = self._display_name(entry, object_classes, dn)
 
             description = ""
             if "description" in entry:
@@ -904,6 +932,7 @@ class LdapManager:
                     description=description,
                     user_disabled=self._is_user_disabled(entry, object_classes),
                     user_locked=self._is_user_locked(entry, object_classes),
+                    computer_disabled=self._is_computer_disabled(entry, object_classes),
                 )
             )
 
@@ -1650,6 +1679,7 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(obj.name)
             name_item.setIcon(self.icon_for_object(obj))
             name_item.setData(Qt.UserRole, obj)
+            name_item.setToolTip(obj.name)
 
             type_item = QTableWidgetItem(obj.object_type)
             desc_item = QTableWidgetItem(obj.description)
@@ -1659,6 +1689,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, type_item)
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
+
+        self.table.resizeColumnToContents(0)
 
     def populate_search_results(self, results: list[LdapObject]) -> None:
         self.table.setRowCount(len(results))
@@ -1667,6 +1699,7 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(obj.name)
             name_item.setIcon(self.icon_for_object(obj))
             name_item.setData(Qt.UserRole, obj)
+            name_item.setToolTip(obj.name)
 
             type_item = QTableWidgetItem(obj.object_type)
             desc_item = QTableWidgetItem(obj.description)
@@ -1676,6 +1709,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, type_item)
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
+
+        self.table.resizeColumnToContents(0)
 
     def run_search(self, base_dn: str, term: str) -> None:
         if not term:
@@ -1841,17 +1876,26 @@ class MainWindow(QMainWindow):
         unlock_action = None
         reset_password_action = None
         selected_users = [o for o in selected_objects if o.object_type == "User"]
+        selected_computers = [o for o in selected_objects if o.object_type == "Computer"]
         disabled_users = [o for o in selected_users if o.user_disabled]
         enabled_users = [o for o in selected_users if not o.user_disabled]
+        disabled_computers = [o for o in selected_computers if o.computer_disabled]
+        enabled_computers = [o for o in selected_computers if not o.computer_disabled]
         if selected_users:
             menu.addSeparator()
             if len(selected_users) == 1 and is_single:
                 reset_password_action = menu.addAction("Reset Password")
             if disabled_users:
-                enable_action = menu.addAction("Enable Account")
+                enable_action = menu.addAction("Enable")
             if enabled_users:
-                disable_action = menu.addAction("Disable Account")
+                disable_action = menu.addAction("Disable")
             unlock_action = menu.addAction("Unlock Account")
+        elif selected_computers:
+            menu.addSeparator()
+            if disabled_computers:
+                enable_action = menu.addAction("Enable")
+            if enabled_computers:
+                disable_action = menu.addAction("Disable")
 
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if not chosen:
@@ -1873,24 +1917,26 @@ class MainWindow(QMainWindow):
             self.reset_password_for_object(obj)
         elif enable_action is not None and chosen == enable_action:
             failed_dns: list[str] = []
-            for user_obj in selected_users:
+            targets = selected_users if selected_users else selected_computers
+            for target_obj in targets:
                 try:
-                    self.ldap.set_user_enabled(user_obj.dn, True)
+                    self.ldap.set_user_enabled(target_obj.dn, True)
                 except Exception:
-                    failed_dns.append(user_obj.dn)
+                    failed_dns.append(target_obj.dn)
             if failed_dns:
-                self.show_error("Enable account failed", "\n".join(failed_dns))
+                self.show_error("Enable failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
         elif disable_action is not None and chosen == disable_action:
             failed_dns: list[str] = []
-            for user_obj in selected_users:
+            targets = selected_users if selected_users else selected_computers
+            for target_obj in targets:
                 try:
-                    self.ldap.set_user_enabled(user_obj.dn, False)
+                    self.ldap.set_user_enabled(target_obj.dn, False)
                 except Exception:
-                    failed_dns.append(user_obj.dn)
+                    failed_dns.append(target_obj.dn)
             if failed_dns:
-                self.show_error("Disable account failed", "\n".join(failed_dns))
+                self.show_error("Disable failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
         elif unlock_action is not None and chosen == unlock_action:
