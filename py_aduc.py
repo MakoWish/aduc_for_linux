@@ -1643,6 +1643,7 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(obj.name)
             name_item.setIcon(self.icon_for_object(obj))
             name_item.setData(Qt.UserRole, obj)
+            name_item.setToolTip(obj.name)
 
             type_item = QTableWidgetItem(obj.object_type)
             desc_item = QTableWidgetItem(obj.description)
@@ -1652,6 +1653,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, type_item)
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
+
+        self.table.resizeColumnToContents(0)
 
     def populate_search_results(self, results: list[LdapObject]) -> None:
         self.table.setRowCount(len(results))
@@ -1660,6 +1663,7 @@ class MainWindow(QMainWindow):
             name_item = QTableWidgetItem(obj.name)
             name_item.setIcon(self.icon_for_object(obj))
             name_item.setData(Qt.UserRole, obj)
+            name_item.setToolTip(obj.name)
 
             type_item = QTableWidgetItem(obj.object_type)
             desc_item = QTableWidgetItem(obj.description)
@@ -1669,6 +1673,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 1, type_item)
             self.table.setItem(row, 2, desc_item)
             self.table.setItem(row, 3, dn_item)
+
+        self.table.resizeColumnToContents(0)
 
     def run_search(self, base_dn: str, term: str) -> None:
         if not term:
