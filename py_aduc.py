@@ -1748,22 +1748,19 @@ class MainWindow(QMainWindow):
         enable_action = None
         disable_action = None
         unlock_action = None
-        add_to_group_action = None
-        remove_from_group_action = None
         reset_password_action = None
         selected_users = [o for o in selected_objects if o.object_type == "User"]
+        disabled_users = [o for o in selected_users if o.user_disabled]
+        enabled_users = [o for o in selected_users if not o.user_disabled]
         if selected_users:
             menu.addSeparator()
             if len(selected_users) == 1 and is_single:
                 reset_password_action = menu.addAction("Reset Password")
-            enable_action = menu.addAction("Enable Account")
-            disable_action = menu.addAction("Disable Account")
+            if disabled_users:
+                enable_action = menu.addAction("Enable Account")
+            if enabled_users:
+                disable_action = menu.addAction("Disable Account")
             unlock_action = menu.addAction("Unlock Account")
-
-        if is_single and obj.object_type in {"User", "Computer"}:
-            menu.addSeparator()
-            add_to_group_action = menu.addAction("Add to Group...")
-            remove_from_group_action = menu.addAction("Remove from Group...")
 
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if not chosen:
@@ -1816,10 +1813,6 @@ class MainWindow(QMainWindow):
                 self.show_error("Unlock account failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
-        elif add_to_group_action is not None and chosen == add_to_group_action:
-            pass
-        elif remove_from_group_action is not None and chosen == remove_from_group_action:
-            pass
 
     def on_tree_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         data = item.data(0, Qt.UserRole) or {}
