@@ -444,6 +444,18 @@ class LdapManager:
 
         return contexts
 
+    @staticmethod
+    def _display_name(entry, object_classes: list[str], fallback: str) -> str:
+        if "computer" in object_classes and "dNSHostName" in entry:
+            try:
+                dns_name = str(entry.dNSHostName).strip()
+            except Exception:
+                dns_name = ""
+            if dns_name:
+                # Keep computer names short (non-FQDN) while preserving full DNS label length.
+                return dns_name.split(".", 1)[0]
+        return str(entry.name) if "name" in entry else fallback
+
     def list_children(self, base_dn: str) -> list[LdapObject]:
         if not self.conn:
             return []
@@ -455,6 +467,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
+                "dNSHostName",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -466,7 +479,7 @@ class LdapManager:
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-            name = str(entry.name) if "name" in entry else dn
+            name = self._display_name(entry, object_classes, dn)
             description = ""
             if "description" in entry:
                 try:
@@ -554,7 +567,7 @@ class LdapManager:
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
-            attributes=["distinguishedName", "name", "objectClass", "description"],
+            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
             size_limit=size_limit,
         )
 
@@ -562,7 +575,7 @@ class LdapManager:
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-            name = str(entry.name) if "name" in entry else dn
+            name = self._display_name(entry, object_classes, dn)
             description = ""
             if "description" in entry:
                 try:
@@ -743,6 +756,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
+                "dNSHostName",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -754,7 +768,7 @@ class LdapManager:
 
         entry = self.conn.entries[0]
         object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-        name = str(entry.name) if "name" in entry else dn
+        name = self._display_name(entry, object_classes, dn)
 
         description = ""
         if "description" in entry:
@@ -885,6 +899,7 @@ class LdapManager:
             attributes=[
                 "distinguishedName",
                 "name",
+                "dNSHostName",
                 "objectClass",
                 "description",
                 "userAccountControl",
@@ -897,7 +912,7 @@ class LdapManager:
         for entry in self.conn.entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
-            name = str(entry.name) if "name" in entry else dn
+            name = self._display_name(entry, object_classes, dn)
 
             description = ""
             if "description" in entry:
