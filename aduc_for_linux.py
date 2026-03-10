@@ -878,6 +878,17 @@ class LdapManager:
         if not ok:
             raise ValueError(str(self.conn.result))
 
+    def set_user_account_control(self, dn: str, value: int) -> None:
+        if not self.conn:
+            return
+
+        ok = self.conn.modify(
+            dn,
+            {"userAccountControl": [(MODIFY_REPLACE, [str(value)])]},
+        )
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
     def reset_password(self, dn: str, new_password: str) -> None:
         if not self.conn:
             return
@@ -1393,10 +1404,24 @@ class UserPropertiesDialog(QDialog):
         ("Trusted for delegation", 0x80000),
     ]
 
-    def __init__(self, obj: LdapObject, attrs: dict[str, list[str]], parent=None) -> None:
+    def __init__(
+        self,
+        ldap: LdapManager,
+        obj: LdapObject,
+        attrs: dict[str, list[str]],
+        search_base: str,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(obj.name)
         self.resize(920, 650)
+        self.ldap = ldap
+        self.user_obj = obj
+        self.search_base = search_base
+        self.original_group_dns: list[str] = []
+        self.current_uac_value = 0
+        self.initially_locked = False
+        self.uac_checkboxes: list[tuple[QCheckBox, int]] = []
 
         tabs = QTabWidget()
         tabs.addTab(self.build_general_tab(obj, attrs), "General")
@@ -1407,9 +1432,12 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
         tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
+        buttons.accepted.connect(self.on_ok)
         buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
+        apply_button = buttons.button(QDialogButtonBox.Apply)
+        if apply_button:
+            apply_button.clicked.connect(self.apply_changes)
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
@@ -1460,7 +1488,8 @@ class UserPropertiesDialog(QDialog):
         form.addRow("Home folder:", self._readonly_line(self._single_attr(attrs, "homeDirectory")))
 
         uac_raw = self._single_attr(attrs, "userAccountControl")
-        form.addRow("userAccountControl:", self._readonly_line(uac_raw))
+        self.uac_value_line = self._readonly_line(uac_raw)
+        form.addRow("userAccountControl:", self.uac_value_line)
         layout.addLayout(form)
 
         flags_label = QLabel("Account options")
@@ -1471,11 +1500,22 @@ class UserPropertiesDialog(QDialog):
             flag_values = int(uac_raw) if uac_raw else 0
         except ValueError:
             flag_values = 0
+        self.current_uac_value = flag_values
+
+        lockout_raw = self._single_attr(attrs, "lockoutTime")
+        try:
+            self.initially_locked = int(lockout_raw) > 0 if lockout_raw else False
+        except ValueError:
+            self.initially_locked = False
 
         for label, bitmask in self.UAC_FLAGS:
             box = QCheckBox(label)
-            box.setEnabled(False)
-            box.setChecked(bool(flag_values & bitmask))
+            if bitmask == 0x0010:
+                box.setChecked(self.initially_locked)
+                box.setToolTip("Active Directory controls lockout state via lockoutTime.")
+            else:
+                box.setChecked(bool(flag_values & bitmask))
+            self.uac_checkboxes.append((box, bitmask))
             layout.addWidget(box)
 
         layout.addStretch()
@@ -1494,23 +1534,123 @@ class UserPropertiesDialog(QDialog):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        table = QTableWidget()
-        table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["Name", "Distinguished Name"])
-        table.verticalHeader().setVisible(False)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.member_of_table = QTableWidget()
+        self.member_of_table.setColumnCount(2)
+        self.member_of_table.setHorizontalHeaderLabels(["Name", "Distinguished Name"])
+        self.member_of_table.verticalHeader().setVisible(False)
+        self.member_of_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.member_of_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.member_of_table.setSelectionMode(QTableWidget.ExtendedSelection)
 
         groups = attrs.get("memberOf", [])
-        table.setRowCount(len(groups))
+        self.member_of_table.setRowCount(len(groups))
+        self.original_group_dns = sorted(groups, key=str.lower)
         for row, dn in enumerate(sorted(groups, key=str.lower)):
             short_name = dn.split(",", 1)[0].split("=", 1)[-1] if "=" in dn else dn
-            table.setItem(row, 0, QTableWidgetItem(short_name))
-            table.setItem(row, 1, QTableWidgetItem(dn))
+            self.member_of_table.setItem(row, 0, QTableWidgetItem(short_name))
+            self.member_of_table.setItem(row, 1, QTableWidgetItem(dn))
 
-        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        layout.addWidget(table)
+        button_row = QHBoxLayout()
+        self.member_of_add_btn = QPushButton("Add...")
+        self.member_of_remove_btn = QPushButton("Remove")
+        button_row.addWidget(self.member_of_add_btn)
+        button_row.addWidget(self.member_of_remove_btn)
+        button_row.addStretch()
+        self.member_of_add_btn.clicked.connect(self.add_group_memberships)
+        self.member_of_remove_btn.clicked.connect(self.remove_selected_group_memberships)
+
+        self.member_of_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.member_of_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        layout.addWidget(self.member_of_table)
+        layout.addLayout(button_row)
         return tab
+
+    def _current_member_of_dns(self) -> list[str]:
+        dns: list[str] = []
+        for row in range(self.member_of_table.rowCount()):
+            dn_item = self.member_of_table.item(row, 1)
+            if dn_item and dn_item.text().strip():
+                dns.append(dn_item.text().strip())
+        return dns
+
+    def add_group_memberships(self) -> None:
+        dlg = SelectDirectoryObjectsDialog(self.ldap, self.search_base, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        existing_dns = set(self._current_member_of_dns())
+        for obj in dlg.selected_objects():
+            if obj.object_type != "Group" or obj.dn in existing_dns:
+                continue
+            row = self.member_of_table.rowCount()
+            self.member_of_table.insertRow(row)
+            name_item = QTableWidgetItem(obj.name)
+            name_item.setIcon(icon_for_directory_object(self.style(), obj))
+            self.member_of_table.setItem(row, 0, name_item)
+            self.member_of_table.setItem(row, 1, QTableWidgetItem(obj.dn))
+            existing_dns.add(obj.dn)
+
+    def remove_selected_group_memberships(self) -> None:
+        rows = sorted({idx.row() for idx in self.member_of_table.selectionModel().selectedRows()}, reverse=True)
+        for row in rows:
+            self.member_of_table.removeRow(row)
+
+    def apply_account_changes(self) -> None:
+        new_uac = self.current_uac_value
+        should_unlock = False
+
+        for box, bitmask in self.uac_checkboxes:
+            checked = box.isChecked()
+            if bitmask == 0x0010:
+                if checked and not self.initially_locked:
+                    box.setChecked(False)
+                if (not checked) and self.initially_locked:
+                    should_unlock = True
+                continue
+            if checked:
+                new_uac |= bitmask
+            else:
+                new_uac &= ~bitmask
+
+        if new_uac != self.current_uac_value:
+            self.ldap.set_user_account_control(self.user_obj.dn, new_uac)
+            self.current_uac_value = new_uac
+            self.uac_value_line.setText(str(new_uac))
+
+        if should_unlock:
+            self.ldap.unlock_account(self.user_obj.dn)
+            self.initially_locked = False
+
+    def apply_member_of_changes(self) -> None:
+        desired = set(self._current_member_of_dns())
+        original = set(self.original_group_dns)
+
+        add_dns = sorted(desired - original)
+        remove_dns = sorted(original - desired)
+
+        for group_dn in add_dns:
+            self.ldap.add_group_member(group_dn, self.user_obj.dn)
+
+        for group_dn in remove_dns:
+            self.ldap.remove_group_member(group_dn, self.user_obj.dn)
+
+        self.original_group_dns = sorted(desired, key=str.lower)
+
+    def apply_changes(self) -> None:
+        try:
+            self.apply_account_changes()
+            self.apply_member_of_changes()
+        except Exception as e:
+            QMessageBox.critical(self, "Apply failed", str(e))
+
+    def on_ok(self) -> None:
+        try:
+            self.apply_account_changes()
+            self.apply_member_of_changes()
+        except Exception as e:
+            QMessageBox.critical(self, "Apply failed", str(e))
+            return
+        self.accept()
 
 
     @staticmethod
@@ -2651,7 +2791,7 @@ class MainWindow(QMainWindow):
         if obj.object_type == "Group" and search_base:
             dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         elif obj.object_type == "User":
-            dlg = UserPropertiesDialog(obj, attrs, self)
+            dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         else:
             dlg = PropertiesDialog(obj, attrs, self)
         dlg.exec()
