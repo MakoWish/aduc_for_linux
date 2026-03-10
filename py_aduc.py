@@ -297,7 +297,7 @@ class LdapObject:
             return "User"
         if "organizationalunit" in classes:
             return "Organizational Unit"
-        if "container" in classes:
+        if "container" in classes or "builtindomain" in classes:
             return "Container"
         if "domain" in classes:
             return "Domain"
