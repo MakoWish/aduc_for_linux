@@ -1,7 +1,17 @@
-<h1>
-  <img src='image.png' width="150" align="left">
-  ADUC for Linux
-</h1>
+<table>
+<tr>
+<td width="160">
+
+<img src="docs/icon.png" width="150">
+
+</td>
+<td>
+
+# ADUC for Linux
+
+</td>
+</tr>
+</table>
 
 Python implementation of Microsoft's Active Directory Users and Computers for Linux.
 
