@@ -2,7 +2,7 @@
 <tr>
 <td width="160">
 
-<img src="docs/icon.png" width="150">
+<img src="icon.png" width="150">
 
 </td>
 <td>
