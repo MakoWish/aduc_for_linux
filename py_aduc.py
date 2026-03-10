@@ -596,12 +596,6 @@ class ConnectDialog(QDialog):
             self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
             self.password_edit.setPlaceholderText("Using current Kerberos ticket")
 
-        if self.auth_mode == "kerberos":
-            self.bind_user_edit.setEnabled(False)
-            self.password_edit.setEnabled(False)
-            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
-            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
-
         form = QFormLayout()
         form.addRow("Server:", self.host_edit)
         form.addRow("Port:", self.port_edit)
@@ -1091,24 +1085,6 @@ class MainWindow(QMainWindow):
 
         if self.auto_connect and self.saved_host:
             QTimer.singleShot(0, self.auto_connect_if_configured)
-
-        connect_action = QAction("Connect", self)
-        connect_action.triggered.connect(self.show_connect_dialog)
-        file_menu.addAction(connect_action)
-
-        refresh_action = QAction("Refresh", self)
-        refresh_action.triggered.connect(self.refresh_current)
-        file_menu.addAction(refresh_action)
-
-        options_action = QAction("Options", self)
-        options_action.triggered.connect(self.show_options_dialog)
-        file_menu.addAction(options_action)
-
-        file_menu.addSeparator()
-
-        exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
         style = self.style()
