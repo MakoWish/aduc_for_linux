@@ -356,6 +356,53 @@ class LdapManager:
     def __init__(self) -> None:
         self.server: Optional[Server] = None
         self.conn: Optional[Connection] = None
+        self.page_size = 500
+
+    def _paged_search_entries(
+        self,
+        search_base: str,
+        search_filter: str,
+        search_scope,
+        attributes: list[str],
+        size_limit: int = 0,
+    ) -> list:
+        if not self.conn:
+            return []
+
+        entries: list = []
+        cookie: Optional[bytes] = None
+        remaining = size_limit if size_limit and size_limit > 0 else None
+
+        while True:
+            page_size = self.page_size if remaining is None else min(self.page_size, remaining)
+            if page_size <= 0:
+                break
+
+            self.conn.search(
+                search_base=search_base,
+                search_filter=search_filter,
+                search_scope=search_scope,
+                attributes=attributes,
+                paged_size=page_size,
+                paged_cookie=cookie,
+            )
+
+            page_entries = list(self.conn.entries)
+            entries.extend(page_entries)
+
+            if remaining is not None:
+                remaining -= len(page_entries)
+                if remaining <= 0:
+                    break
+
+            controls = self.conn.result.get("controls", {})
+            page_control = controls.get("1.2.840.113556.1.4.319", {})
+            control_value = page_control.get("value", {}) if isinstance(page_control, dict) else {}
+            cookie = control_value.get("cookie") if isinstance(control_value, dict) else None
+            if not cookie:
+                break
+
+        return entries
 
     def connect_simple(self, host: str, bind_user: str, password: str, port: int = 636) -> None:
         tls = Tls(validate=ssl.CERT_REQUIRED)
@@ -423,7 +470,7 @@ class LdapManager:
         if not self.conn:
             return []
 
-        self.conn.search(
+        entries = self._paged_search_entries(
             search_base=base_dn,
             search_filter="(objectClass=*)",
             search_scope=LEVEL,
@@ -439,7 +486,7 @@ class LdapManager:
         )
 
         results: list[LdapObject] = []
-        for entry in self.conn.entries:
+        for entry in entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             name = self._display_name(entry, object_classes, dn)
@@ -544,7 +591,7 @@ class LdapManager:
 
         search_filter = self._build_search_filter(term, search_mode)
 
-        self.conn.search(
+        entries = self._paged_search_entries(
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
@@ -552,7 +599,7 @@ class LdapManager:
             size_limit=size_limit,
         )
         results: list[LdapObject] = []
-        for entry in self.conn.entries:
+        for entry in entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             name = self._display_name(entry, object_classes, dn)
@@ -854,7 +901,7 @@ class LdapManager:
 
         search_filter = self._build_search_filter(term, search_mode)
 
-        self.conn.search(
+        entries = self._paged_search_entries(
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
@@ -871,7 +918,7 @@ class LdapManager:
             size_limit=size_limit,
         )
         results: list[LdapObject] = []
-        for entry in self.conn.entries:
+        for entry in entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
             name = self._display_name(entry, object_classes, dn)
