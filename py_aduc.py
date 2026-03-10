@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -68,6 +68,8 @@ class LdapObject:
     name: str
     object_classes: list[str]
     description: str = ""
+    user_account_control: Optional[int] = None
+    lockout_time: Optional[int] = None
 
     @property
     def is_container(self) -> bool:
@@ -89,6 +91,49 @@ class LdapObject:
         if "domain" in classes:
             return "Domain"
         return "Object"
+
+    @property
+    def is_user_disabled(self) -> bool:
+        if self.object_type != "User" or self.user_account_control is None:
+            return False
+        return bool(self.user_account_control & 0x0002)
+
+    @property
+    def is_user_locked(self) -> bool:
+        if self.object_type != "User" or self.lockout_time is None:
+            return False
+        return self.lockout_time > 0
+
+
+def build_overlay_icon(base_icon: QIcon, *, disabled: bool = False, locked: bool = False) -> QIcon:
+    if not disabled and not locked:
+        return base_icon
+
+    size = 16
+    pixmap = base_icon.pixmap(size, size)
+    if pixmap.isNull():
+        return base_icon
+
+    canvas = QPixmap(pixmap)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    if disabled:
+        painter.setBrush(QColor(220, 53, 69))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(5, 5, 10, 10)
+        painter.setPen(QPen(QColor(255, 255, 255), 2))
+        painter.drawLine(7, 10, 13, 10)
+
+    if locked:
+        painter.setBrush(QColor(255, 193, 7))
+        painter.setPen(Qt.NoPen)
+        painter.drawRect(0, 10, 8, 6)
+        painter.setPen(QPen(QColor(255, 193, 7), 2))
+        painter.drawArc(0, 5, 8, 8, 0, 180 * 16)
+
+    painter.end()
+    return QIcon(canvas)
 
 
 class LdapManager:
@@ -153,7 +198,7 @@ class LdapManager:
             search_base=base_dn,
             search_filter="(objectClass=*)",
             search_scope=LEVEL,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description", "userAccountControl", "lockoutTime"],
         )
 
         results: list[LdapObject] = []
@@ -179,12 +224,28 @@ class LdapManager:
                 except Exception:
                     description = ""
 
+            user_account_control = None
+            if "userAccountControl" in entry:
+                try:
+                    user_account_control = int(str(entry.userAccountControl))
+                except Exception:
+                    user_account_control = None
+
+            lockout_time = None
+            if "lockoutTime" in entry:
+                try:
+                    lockout_time = int(str(entry.lockoutTime))
+                except Exception:
+                    lockout_time = None
+
             results.append(
                 LdapObject(
                     dn=dn,
                     name=name,
                     object_classes=object_classes,
                     description=description,
+                    user_account_control=user_account_control,
+                    lockout_time=lockout_time,
                 )
             )
 
@@ -251,7 +312,7 @@ class LdapManager:
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description", "userAccountControl", "lockoutTime"],
             size_limit=size_limit,
         )
 
@@ -278,12 +339,28 @@ class LdapManager:
                 except Exception:
                     description = ""
 
+            user_account_control = None
+            if "userAccountControl" in entry:
+                try:
+                    user_account_control = int(str(entry.userAccountControl))
+                except Exception:
+                    user_account_control = None
+
+            lockout_time = None
+            if "lockoutTime" in entry:
+                try:
+                    lockout_time = int(str(entry.lockoutTime))
+                except Exception:
+                    lockout_time = None
+
             results.append(
                 LdapObject(
                     dn=dn,
                     name=name,
                     object_classes=object_classes,
                     description=description,
+                    user_account_control=user_account_control,
+                    lockout_time=lockout_time,
                 )
             )
 
@@ -387,7 +464,15 @@ class LdapManager:
             search_base=dn,
             search_filter="(objectClass=*)",
             search_scope=BASE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=[
+                "distinguishedName",
+                "name",
+                "dNSHostName",
+                "objectClass",
+                "description",
+                "userAccountControl",
+                "lockoutTime",
+            ],
         )
         if not self.conn.entries:
             return None
@@ -414,11 +499,27 @@ class LdapManager:
             except Exception:
                 description = ""
 
+        user_account_control = None
+        if "userAccountControl" in entry:
+            try:
+                user_account_control = int(str(entry.userAccountControl))
+            except Exception:
+                user_account_control = None
+
+        lockout_time = None
+        if "lockoutTime" in entry:
+            try:
+                lockout_time = int(str(entry.lockoutTime))
+            except Exception:
+                lockout_time = None
+
         return LdapObject(
             dn=dn,
             name=name,
             object_classes=object_classes,
             description=description,
+            user_account_control=user_account_control,
+            lockout_time=lockout_time,
         )
 
     def get_group_members(self, group_dn: str) -> list[LdapObject]:
@@ -525,7 +626,15 @@ class LdapManager:
             search_base=base_dn,
             search_filter=search_filter,
             search_scope=SUBTREE,
-            attributes=["distinguishedName", "name", "dNSHostName", "objectClass", "description"],
+            attributes=[
+                "distinguishedName",
+                "name",
+                "dNSHostName",
+                "objectClass",
+                "description",
+                "userAccountControl",
+                "lockoutTime",
+            ],
             size_limit=size_limit,
         )
 
@@ -553,12 +662,28 @@ class LdapManager:
                 except Exception:
                     description = ""
 
+            user_account_control = None
+            if "userAccountControl" in entry:
+                try:
+                    user_account_control = int(str(entry.userAccountControl))
+                except Exception:
+                    user_account_control = None
+
+            lockout_time = None
+            if "lockoutTime" in entry:
+                try:
+                    lockout_time = int(str(entry.lockoutTime))
+                except Exception:
+                    lockout_time = None
+
             results.append(
                 LdapObject(
                     dn=dn,
                     name=name,
                     object_classes=object_classes,
                     description=description,
+                    user_account_control=user_account_control,
+                    lockout_time=lockout_time,
                 )
             )
 
@@ -798,7 +923,8 @@ class SelectDirectoryObjectsDialog(QDialog):
             name_item = QTableWidgetItem(obj.name)
             if obj.object_type == "User":
                 icon = QIcon.fromTheme("user-identity")
-                name_item.setIcon(icon if not icon.isNull() else self.style().standardIcon(QStyle.SP_FileIcon))
+                base_icon = icon if not icon.isNull() else self.style().standardIcon(QStyle.SP_FileIcon)
+                name_item.setIcon(build_overlay_icon(base_icon, disabled=obj.is_user_disabled, locked=obj.is_user_locked))
             elif obj.object_type == "Group":
                 icon = QIcon.fromTheme("system-users")
                 name_item.setIcon(icon if not icon.isNull() else self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
@@ -929,7 +1055,8 @@ class GroupPropertiesDialog(QDialog):
             return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
         if obj.object_type == "User":
             icon = QIcon.fromTheme("user-identity")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+            base_icon = icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+            return build_overlay_icon(base_icon, disabled=obj.is_user_disabled, locked=obj.is_user_locked)
         if obj.object_type == "Group":
             icon = QIcon.fromTheme("system-users")
             return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
@@ -1001,6 +1128,7 @@ class GroupPropertiesDialog(QDialog):
             if obj.dn in existing_dns:
                 continue
             item = QListWidgetItem(f"{obj.name} ({obj.object_type})")
+            item.setIcon(self.icon_for_object(obj))
             item.setData(Qt.UserRole, obj)
             item.setToolTip(obj.dn)
             self.members_list.addItem(item)
@@ -1108,7 +1236,8 @@ class MainWindow(QMainWindow):
             return icon if not icon.isNull() else style.standardIcon(QStyle.SP_DirIcon)
         if obj.object_type == "User":
             icon = QIcon.fromTheme("user-identity")
-            return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+            base_icon = icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
+            return build_overlay_icon(base_icon, disabled=obj.is_user_disabled, locked=obj.is_user_locked)
         if obj.object_type == "Group":
             icon = QIcon.fromTheme("system-users")
             return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileDialogDetailedView)
