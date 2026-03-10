@@ -8,6 +8,8 @@ Migrating away from Windows while still working in a Microsoft environment has p
 
 ![Active Directory for Linux](image.png)
 
+<img src='image.png' alt="Active Directory Users and Computers for Linux" width="150" height="150">
+
 ## Sample Desktop Application Launcher
 
 `~/.local/share/applications/aduc_for_linux.desktop`
