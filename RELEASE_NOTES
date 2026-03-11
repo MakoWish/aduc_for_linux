@@ -1,3 +1,7 @@
+Version: 0.2.1
+Change:  Bug fix
+Details: Corrected issue after move operations that caused a full tree reload, hanging the UI
+
 Version: 0.2.0
 Change:  Enhancement
 Details: Implemented object "Move" functionality and started RELEASE_NOTES
