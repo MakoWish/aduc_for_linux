@@ -71,6 +71,13 @@ USER_CLASSES = {"user", "person", "organizationalperson"}
 GROUP_CLASSES = {"group"}
 COMPUTER_CLASSES = {"computer"}
 
+CREATABLE_CHILD_CLASS_BY_ACTION = {
+    "user": "user",
+    "group": "group",
+    "computer": "computer",
+    "organizational_unit": "organizationalunit",
+}
+
 SEARCH_FILTER_USERS_CONTACTS_GROUPS = "users_contacts_groups"
 SEARCH_FILTER_COMPUTERS = "computers"
 SEARCH_FILTER_ORGANIZATIONAL_UNITS = "organizational_units"
@@ -1065,6 +1072,35 @@ class LdapManager:
         ok = self.conn.delete(dn)
         if not ok:
             raise ValueError(str(self.conn.result))
+
+    def get_allowed_child_classes(self, dn: str) -> set[str]:
+        if not self.conn:
+            return set()
+
+        self.conn.search(
+            search_base=dn,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["allowedChildClassesEffective", "allowedChildClasses"],
+        )
+        if not self.conn.entries:
+            return set()
+
+        entry = self.conn.entries[0]
+        allowed_classes: set[str] = set()
+        for attr in ("allowedChildClassesEffective", "allowedChildClasses"):
+            if attr not in entry:
+                continue
+            try:
+                values = entry[attr].values
+                if isinstance(values, list):
+                    allowed_classes.update(str(v).lower() for v in values)
+                elif values:
+                    allowed_classes.add(str(values).lower())
+            except Exception:
+                continue
+
+        return allowed_classes
 
     def rename_object(self, dn: str, new_name: str) -> None:
         if not self.conn:
@@ -3197,6 +3233,38 @@ class MainWindow(QMainWindow):
             return
         self.create_computer_under_dn(self.current_dn)
 
+    def allowed_creation_actions_for_dn(self, dn: str) -> set[str]:
+        try:
+            allowed_classes = self.ldap.get_allowed_child_classes(dn)
+        except Exception:
+            return set()
+
+        allowed_actions: set[str] = set()
+        for action_name, required_class in CREATABLE_CHILD_CLASS_BY_ACTION.items():
+            if required_class in allowed_classes:
+                allowed_actions.add(action_name)
+        return allowed_actions
+
+    def add_creation_actions_to_menu(self, menu: QMenu, parent_dn: str) -> dict[str, Optional[QAction]]:
+        allowed_actions = self.allowed_creation_actions_for_dn(parent_dn)
+        actions: dict[str, Optional[QAction]] = {
+            "user": None,
+            "group": None,
+            "computer": None,
+            "organizational_unit": None,
+        }
+
+        if "user" in allowed_actions:
+            actions["user"] = menu.addAction("New User...")
+        if "group" in allowed_actions:
+            actions["group"] = menu.addAction("New Group...")
+        if "computer" in allowed_actions:
+            actions["computer"] = menu.addAction("New Computer...")
+        if "organizational_unit" in allowed_actions:
+            actions["organizational_unit"] = menu.addAction("New Organizational Unit...")
+
+        return actions
+
     def ldap_object_from_tree_item(self, item: QTreeWidgetItem) -> Optional[LdapObject]:
         if not item:
             return None
@@ -3229,10 +3297,11 @@ class MainWindow(QMainWindow):
         properties_action = menu.addAction("Properties")
         refresh_action = menu.addAction("Refresh")
         search_action = menu.addAction("Find...")
-        create_user_action = menu.addAction("New User...") if obj.is_container else None
-        create_group_action = menu.addAction("New Group...") if obj.is_container else None
-        create_computer_action = menu.addAction("New Computer...") if obj.is_container else None
-        create_ou_action = menu.addAction("New Organizational Unit...") if obj.is_container else None
+        create_actions = self.add_creation_actions_to_menu(menu, obj.dn) if obj.is_container else {}
+        create_user_action = create_actions.get("user")
+        create_group_action = create_actions.get("group")
+        create_computer_action = create_actions.get("computer")
+        create_ou_action = create_actions.get("organizational_unit")
         copy_dn_action = menu.addAction("Copy Distinguished Name")
 
         expand_action = None
@@ -3321,10 +3390,11 @@ class MainWindow(QMainWindow):
         if is_single and obj.is_container:
             open_action = menu.addAction("Open")
             menu.addSeparator()
-            new_user_action = menu.addAction("New User...")
-            new_group_action = menu.addAction("New Group...")
-            new_computer_action = menu.addAction("New Computer...")
-            new_ou_action = menu.addAction("New Organizational Unit...")
+            create_actions = self.add_creation_actions_to_menu(menu, obj.dn)
+            new_user_action = create_actions.get("user")
+            new_group_action = create_actions.get("group")
+            new_computer_action = create_actions.get("computer")
+            new_ou_action = create_actions.get("organizational_unit")
         else:
             new_user_action = None
             new_group_action = None
