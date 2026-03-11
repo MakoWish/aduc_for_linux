@@ -316,6 +316,11 @@ def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
     icon = QIcon.fromTheme("text-x-generic")
     return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
 
+def icon_for_object_classes(style, object_classes: list[str], has_child_ou: bool = False) -> QIcon:
+    classes = [str(cls).lower() for cls in object_classes]
+    obj = LdapObject(dn="", name="", object_classes=classes, has_child_ou=has_child_ou)
+    return icon_for_directory_object(style, obj)
+
 
 def add_user_state_overlays(base_icon: QIcon, obj: "LdapObject", size: int = 16) -> QIcon:
     """Overlay state badges onto user icons (disabled / locked)."""
@@ -2499,26 +2504,51 @@ class DirectoryTreeWidget(QTreeWidget):
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.setDropIndicatorShown(True)
+        self._hover_drop_item: Optional[QTreeWidgetItem] = None
+
+    def _set_hover_drop_item(self, item: Optional[QTreeWidgetItem]) -> None:
+        if self._hover_drop_item is item:
+            return
+
+        if self._hover_drop_item is not None:
+            self._hover_drop_item.setBackground(0, QBrush())
+
+        self._hover_drop_item = item
+
+        if self._hover_drop_item is not None:
+            self._hover_drop_item.setBackground(0, QBrush(QColor("#CFE8FF")))
 
     def dragEnterEvent(self, event) -> None:
         if self._can_accept_drop(event):
+            item = self.itemAt(event.position().toPoint())
+            self._set_hover_drop_item(item)
             event.acceptProposedAction()
             return
+        self._set_hover_drop_item(None)
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:
         if self._can_accept_drop(event):
+            item = self.itemAt(event.position().toPoint())
+            self._set_hover_drop_item(item)
             event.acceptProposedAction()
             return
+        self._set_hover_drop_item(None)
         event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._set_hover_drop_item(None)
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:
         if not self._can_accept_drop(event):
+            self._set_hover_drop_item(None)
             event.ignore()
             return
 
         item = self.itemAt(event.position().toPoint())
         if not item:
+            self._set_hover_drop_item(None)
             event.ignore()
             return
 
@@ -2530,10 +2560,12 @@ class DirectoryTreeWidget(QTreeWidget):
 
         payload = self._decode_drop_payload(event)
         if not payload:
+            self._set_hover_drop_item(None)
             event.ignore()
             return
 
         self.directory_move_drop.emit(target_dn, payload)
+        self._set_hover_drop_item(None)
         event.acceptProposedAction()
 
     def _can_accept_drop(self, event) -> bool:
@@ -3494,6 +3526,33 @@ class MainWindow(QMainWindow):
             self.show_error("Delete failed", "\n".join(failures))
         self.refresh_current()
 
+    @staticmethod
+    def _display_name_from_dn(dn: str) -> str:
+        first_rdn = dn.split(",", 1)[0].strip()
+        if "=" in first_rdn:
+            return first_rdn.split("=", 1)[1].strip() or dn
+        return dn
+
+    def confirm_move_objects(self, objects: list[LdapObject], target_dn: str) -> bool:
+        if not objects:
+            return False
+
+        target_name = self._display_name_from_dn(target_dn)
+        if len(objects) == 1:
+            obj = objects[0]
+            message = f"Are you sure you want to move {obj.name} to {target_name}?"
+        else:
+            message = f"Are you sure you want to move {len(objects)} objects to {target_name}?"
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm move",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
     def move_objects_to_container(self, objects: list[LdapObject], target_dn: str) -> None:
         if not objects:
             return
@@ -3546,6 +3605,9 @@ class MainWindow(QMainWindow):
 
         target_dn = dlg.selected_target_dn()
         if not target_dn:
+            return
+
+        if not self.confirm_move_objects(selected_objects, target_dn):
             return
 
         self.move_objects_to_container(selected_objects, target_dn)
@@ -3602,6 +3664,9 @@ class MainWindow(QMainWindow):
 
         if not objects:
             self.statusBar().showMessage("Unable to resolve dragged directory objects.")
+            return
+
+        if not self.confirm_move_objects(objects, target_dn):
             return
 
         self.move_objects_to_container(objects, target_dn)
