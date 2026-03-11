@@ -2952,14 +2952,22 @@ class MainWindow(QMainWindow):
 
         dialog.adjustSize()
 
-        window_center_global = self.frameGeometry().center()
-        screen = QApplication.screenAt(window_center_global)
+        main_window = self.window()
+        window_center_global = main_window.frameGeometry().center()
+
+        main_window_handle = main_window.windowHandle()
+        screen = main_window_handle.screen() if main_window_handle is not None else None
+        if screen is None:
+            screen = QApplication.screenAt(window_center_global)
         if screen is None:
             screen = self.screen() or QApplication.primaryScreen()
 
         dialog_window = dialog.windowHandle()
-        if dialog_window is not None and screen is not None:
-            dialog_window.setScreen(screen)
+        if dialog_window is not None:
+            if main_window_handle is not None:
+                dialog_window.setTransientParent(main_window_handle)
+            if screen is not None:
+                dialog_window.setScreen(screen)
 
         dialog_rect = dialog.frameGeometry()
         dialog_rect.moveCenter(window_center_global)
@@ -3082,7 +3090,6 @@ class MainWindow(QMainWindow):
         loading.setWindowTitle("Please wait")
         loading.setWindowModality(Qt.WindowModal)
         loading.setWindowFlag(Qt.Dialog, True)
-        loading.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         loading.setCancelButton(None)
         loading.setMinimumDuration(0)
         loading.setAutoClose(False)
@@ -3097,6 +3104,7 @@ class MainWindow(QMainWindow):
         self.center_dialog_over_main_window(loading)
         QTimer.singleShot(0, lambda: self.center_dialog_over_main_window(loading))
         QTimer.singleShot(75, lambda: self.center_dialog_over_main_window(loading))
+        QTimer.singleShot(150, lambda: self.center_dialog_over_main_window(loading))
 
         try:
             action()
