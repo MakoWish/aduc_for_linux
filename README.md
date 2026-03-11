@@ -74,6 +74,8 @@ For normal use, prefer running through the installed virtual environment (launch
 
 ## Configuration
 
+On initial launch, you will need to first connect to a domain controller via **_File > Connect_**. If you are working from a domain-joined machine, you may optionally enable `Kerberos / SSO` connection from File **_File > Options_**. When using `Kerberos / SSO`, you may also optionally enable `Auto-connect on launch`. 
+
 The app stores some preference settings in:
 
 - `~/.config/aduc-linux/settings.json`
