@@ -1300,6 +1300,10 @@ class ConnectDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+        # Make the connect dialog wide enough for long title bars and field contents.
+        hint = self.sizeHint()
+        self.setMinimumWidth(max(560, hint.width() * 2))
+
     def values(self) -> tuple[str, int, str, str]:
         return (
             self.host_edit.text().strip(),
