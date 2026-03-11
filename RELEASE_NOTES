@@ -1,3 +1,7 @@
+Version: 0.2.3
+Change:  Bug fix
+Details: Removed initial "loading" dialog, because I couldn't get it positioned properly. 
+
 Version: 0.2.2
 Change:  Bug fix
 Details: "Add to group" search functionality returned users only. Corrected to groups only.
