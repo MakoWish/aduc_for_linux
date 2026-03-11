@@ -9,6 +9,7 @@ import sys
 import urllib.error
 import urllib.request
 import webbrowser
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -36,7 +37,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
-    QGraphicsOpacityEffect,
     QPushButton,
     QSplitter,
     QStyle,
@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QSplashScreen,
 )
 
 from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, Connection, Server, Tls
@@ -4423,53 +4424,61 @@ def prompt_for_update_if_available() -> None:
         webbrowser.open("https://github.com/MakoWish/aduc_for_linux")
 
 
-class StartupSplash(QWidget):
-    def __init__(self, parent: QMainWindow, duration_ms: int = 3000) -> None:
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)
+class StartupSplash(QSplashScreen):
+    def __init__(self, duration_ms: int = 3000) -> None:
+        splash_pixmap = QPixmap(SPLASH_IMAGE_FILE)
+        image_loaded = not splash_pixmap.isNull()
+        if not image_loaded:
+            splash_pixmap = QPixmap(480, 270)
+            splash_pixmap.fill(QColor("black"))
+        super().__init__(splash_pixmap)
+
+        self._duration_ms = duration_ms
+        self._start_time = 0.0
+
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setWindowOpacity(1.0)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        if not image_loaded:
+            self.showMessage(
+                "Starting ADUC for Linux...",
+                Qt.AlignCenter | Qt.AlignBottom,
+                QColor("white"),
+            )
 
-        image_label = QLabel(self)
-        image_label.setAlignment(Qt.AlignCenter)
-
-        pixmap = QPixmap(SPLASH_IMAGE_FILE)
-        if pixmap.isNull():
-            image_label.setText("Starting ADUC for Linux...")
-            image_label.setStyleSheet("color: white; font-size: 18px;")
-        else:
-            image_label.setPixmap(pixmap)
-
-        layout.addWidget(image_label)
-
-        self.opacity_effect = QGraphicsOpacityEffect(self)
-        self.opacity_effect.setOpacity(1.0)
-        self.setGraphicsEffect(self.opacity_effect)
-
-        self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity", self)
+        self.fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
         self.fade_animation.setDuration(700)
         self.fade_animation.setStartValue(1.0)
         self.fade_animation.setEndValue(0.0)
         self.fade_animation.setEasingCurve(QEasingCurve.OutCubic)
         self.fade_animation.finished.connect(self.close)
 
-        self.setGeometry(parent.rect())
-        self.show()
-        self.raise_()
-        fade_delay_ms = max(0, duration_ms - self.fade_animation.duration())
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._start_time == 0.0:
+            self._start_time = time.monotonic()
+
+    def finish_with_fade(self) -> None:
+        elapsed_ms = 0
+        if self._start_time:
+            elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
+        fade_delay_ms = max(0, self._duration_ms - self.fade_animation.duration() - elapsed_ms)
         QTimer.singleShot(fade_delay_ms, self.fade_animation.start)
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(build_application_icon())
-    prompt_for_update_if_available()
+    splash = StartupSplash()
+    splash.show()
+    app.processEvents()
+
     win = MainWindow()
     win.show()
-    splash = StartupSplash(win)
+    splash.finish_with_fade()
+
+    QTimer.singleShot(0, prompt_for_update_if_available)
     return app.exec()
 
 
