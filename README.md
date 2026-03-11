@@ -103,3 +103,7 @@ Potential next improvements:
 ## Disclaimer
 
 This is an independent project and is not an official Microsoft product. Although all efforts are made to ensure this project works without issue, use at your own risk.
+
+## Donate
+
+Like this project? [Buy me a coffee!](buymeacoffee.com/MakoWish) 
