@@ -84,6 +84,7 @@ CREATABLE_CHILD_CLASS_BY_ACTION = {
 SEARCH_FILTER_USERS_CONTACTS_GROUPS = "users_contacts_groups"
 SEARCH_FILTER_COMPUTERS = "computers"
 SEARCH_FILTER_ORGANIZATIONAL_UNITS = "organizational_units"
+SEARCH_FILTER_GROUPS = "groups"
 
 SEARCH_FILTER_OPTIONS = [
     ("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS),
@@ -742,6 +743,8 @@ class LdapManager:
             return "(objectClass=computer)"
         if search_mode == SEARCH_FILTER_ORGANIZATIONAL_UNITS:
             return "(objectClass=organizationalUnit)"
+        if search_mode == SEARCH_FILTER_GROUPS:
+            return "(objectClass=group)"
         return "(|(objectClass=user)(objectClass=group)(objectClass=contact))"
 
     def _build_search_filter(self, term: str, search_mode: str) -> str:
@@ -1724,7 +1727,12 @@ class UserPropertiesDialog(QDialog):
         return dns
 
     def add_group_memberships(self) -> None:
-        dlg = SelectDirectoryObjectsDialog(self.ldap, self.search_base, self)
+        dlg = SelectDirectoryObjectsDialog(
+            self.ldap,
+            self.search_base,
+            self,
+            search_options=[("Groups", SEARCH_FILTER_GROUPS)],
+        )
         if dlg.exec() != QDialog.Accepted:
             return
 
@@ -2109,7 +2117,13 @@ class SearchDialog(QDialog):
 
 
 class SelectDirectoryObjectsDialog(QDialog):
-    def __init__(self, ldap: LdapManager, search_base: str, parent=None) -> None:
+    def __init__(
+        self,
+        ldap: LdapManager,
+        search_base: str,
+        parent=None,
+        search_options: list[tuple[str, str]] | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Select Users, Contacts, Computers, or Groups")
         self.resize(800, 500)
@@ -2121,8 +2135,10 @@ class SelectDirectoryObjectsDialog(QDialog):
         self.search_edit.returnPressed.connect(self.run_search)
 
         self.search_type_combo = QComboBox()
-        for label, value in SEARCH_FILTER_OPTIONS:
+        options = search_options or SEARCH_FILTER_OPTIONS
+        for label, value in options:
             self.search_type_combo.addItem(label, value)
+        self.search_type_combo.setEnabled(len(options) > 1)
 
         self.search_btn = QPushButton("Search")
         self.search_btn.clicked.connect(self.run_search)
