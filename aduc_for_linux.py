@@ -3561,25 +3561,50 @@ class MainWindow(QMainWindow):
         failures: list[str] = []
         moved_count = 0
 
-        for obj in objects:
-            current_parent = self.ldap.parent_dn(obj.dn)
-            if not current_parent:
-                failures.append(f"{obj.name}: object has no movable parent")
-                continue
-            if current_parent.lower() == normalized_target:
-                continue
-            if obj.dn.strip().lower() == normalized_target:
-                failures.append(f"{obj.name}: cannot move an object into itself")
-                continue
-            if normalized_target.endswith("," + obj.dn.strip().lower()):
-                failures.append(f"{obj.name}: cannot move an object into its own subtree")
-                continue
+        loading = QProgressDialog("Preparing move operation...", None, 0, len(objects), self)
+        loading.setWindowTitle("Moving objects")
+        loading.setWindowModality(Qt.WindowModal)
+        loading.setWindowFlag(Qt.Dialog, True)
+        loading.setCancelButton(None)
+        loading.setMinimumDuration(0)
+        loading.setAutoClose(False)
+        loading.setAutoReset(False)
+        loading.setParent(self, Qt.Dialog)
+        loading.ensurePolished()
+        self.center_dialog_over_main_window(loading)
+        loading.show()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
-            try:
-                self.ldap.move_object(obj.dn, target_dn)
-                moved_count += 1
-            except Exception as e:
-                failures.append(f"{obj.dn}: {e}")
+        try:
+            with self.busy_cursor():
+                for index, obj in enumerate(objects, start=1):
+                    loading.setLabelText(f"Moving {index}/{len(objects)}: {obj.name}")
+                    loading.setValue(index - 1)
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+                    current_parent = self.ldap.parent_dn(obj.dn)
+                    if not current_parent:
+                        failures.append(f"{obj.name}: object has no movable parent")
+                        continue
+                    if current_parent.lower() == normalized_target:
+                        continue
+                    if obj.dn.strip().lower() == normalized_target:
+                        failures.append(f"{obj.name}: cannot move an object into itself")
+                        continue
+                    if normalized_target.endswith("," + obj.dn.strip().lower()):
+                        failures.append(f"{obj.name}: cannot move an object into its own subtree")
+                        continue
+
+                    try:
+                        self.ldap.move_object(obj.dn, target_dn)
+                        moved_count += 1
+                    except Exception as e:
+                        failures.append(f"{obj.dn}: {e}")
+
+                loading.setValue(len(objects))
+                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        finally:
+            loading.close()
 
         if failures:
             self.show_error("Move failed", "\n".join(failures))
