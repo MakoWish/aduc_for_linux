@@ -3083,31 +3083,6 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def run_with_loading(self, message: str, action) -> None:
-        loading = QProgressDialog(message, None, 0, 0, self)
-        loading.setWindowTitle("Please wait")
-        loading.setWindowModality(Qt.WindowModal)
-        loading.setWindowFlag(Qt.Dialog, True)
-        loading.setCancelButton(None)
-        loading.setMinimumDuration(0)
-        loading.setAutoClose(False)
-        loading.setAutoReset(False)
-
-        loading.setParent(self, Qt.Dialog)
-        loading.ensurePolished()
-        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-        self.center_dialog_over_main_window(loading)
-        loading.show()
-        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-        self.center_dialog_over_main_window(loading)
-        loading.raise_()
-        loading.repaint()
-
-        try:
-            action()
-        finally:
-            loading.close()
-
     def load_settings(self) -> None:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -3202,7 +3177,8 @@ class MainWindow(QMainWindow):
 
                 self.populate_roots()
 
-            self.run_with_loading("Auto-connecting to Active Directory...", connect_and_load)
+            with self.busy_cursor():
+                connect_and_load()
         except Exception as e:
             self.show_error("Auto-connect failed", str(e))
             return
