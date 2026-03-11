@@ -2731,38 +2731,68 @@ class MoveOperationWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(int, list)
 
-    def __init__(self, ldap: LdapManager, objects: list[LdapObject], target_dn: str) -> None:
+    def __init__(
+        self,
+        auth_mode: str,
+        host: str,
+        port: int,
+        bind_user: str,
+        bind_password: str,
+        objects: list[LdapObject],
+        target_dn: str,
+    ) -> None:
         super().__init__()
-        self.ldap = ldap
+        self.auth_mode = auth_mode
+        self.host = host
+        self.port = port
+        self.bind_user = bind_user
+        self.bind_password = bind_password
         self.objects = objects
         self.target_dn = target_dn
 
     def run(self) -> None:
-        normalized_target = self.target_dn.strip().lower()
         failures: list[str] = []
         moved_count = 0
+        normalized_target = self.target_dn.strip().lower()
+        ldap = LdapManager()
 
-        for index, obj in enumerate(self.objects, start=1):
-            self.progress.emit(index, len(self.objects), obj.name)
+        try:
+            if self.auth_mode == "kerberos":
+                ldap.connect_kerberos(self.host, port=self.port)
+            else:
+                ldap.connect_simple(self.host, self.bind_user, self.bind_password, port=self.port)
+        except Exception as e:
+            self.finished.emit(0, [f"Unable to connect for move operation: {e}"])
+            return
 
-            current_parent = self.ldap.parent_dn(obj.dn)
-            if not current_parent:
-                failures.append(f"{obj.name}: object has no movable parent")
-                continue
-            if current_parent.lower() == normalized_target:
-                continue
-            if obj.dn.strip().lower() == normalized_target:
-                failures.append(f"{obj.name}: cannot move an object into itself")
-                continue
-            if normalized_target.endswith("," + obj.dn.strip().lower()):
-                failures.append(f"{obj.name}: cannot move an object into its own subtree")
-                continue
+        try:
+            for index, obj in enumerate(self.objects, start=1):
+                self.progress.emit(index, len(self.objects), obj.name)
 
-            try:
-                self.ldap.move_object(obj.dn, self.target_dn)
-                moved_count += 1
-            except Exception as e:
-                failures.append(f"{obj.dn}: {e}")
+                current_parent = ldap.parent_dn(obj.dn)
+                if not current_parent:
+                    failures.append(f"{obj.name}: object has no movable parent")
+                    continue
+                if current_parent.lower() == normalized_target:
+                    continue
+                if obj.dn.strip().lower() == normalized_target:
+                    failures.append(f"{obj.name}: cannot move an object into itself")
+                    continue
+                if normalized_target.endswith("," + obj.dn.strip().lower()):
+                    failures.append(f"{obj.name}: cannot move an object into its own subtree")
+                    continue
+
+                try:
+                    ldap.move_object(obj.dn, self.target_dn)
+                    moved_count += 1
+                except Exception as e:
+                    failures.append(f"{obj.dn}: {e}")
+        finally:
+            if ldap.conn:
+                try:
+                    ldap.conn.unbind()
+                except Exception:
+                    pass
 
         self.finished.emit(moved_count, failures)
 
@@ -3613,9 +3643,7 @@ class MainWindow(QMainWindow):
 
         if self._move_thread:
             self._move_thread.quit()
-            self._move_thread.wait()
-            self._move_thread.deleteLater()
-            self._move_thread = None
+
         self._move_worker = None
 
         if failures:
@@ -3623,6 +3651,12 @@ class MainWindow(QMainWindow):
 
         if moved_count > 0:
             self.refresh_current()
+
+    def _on_move_thread_finished(self) -> None:
+        if self._move_thread:
+            self._move_thread.deleteLater()
+            self._move_thread = None
+        self.statusBar().clearMessage()
 
     def move_objects_to_container(self, objects: list[LdapObject], target_dn: str) -> None:
         if not objects:
@@ -3646,14 +3680,29 @@ class MainWindow(QMainWindow):
 
         self._move_progress_dialog = progress
         self._move_thread = QThread(self)
-        self._move_worker = MoveOperationWorker(self.ldap, objects, target_dn)
+        host = self.saved_host
+        if not host and self.ldap.server:
+            host = str(getattr(self.ldap.server, "host", "") or "")
+
+        self._move_worker = MoveOperationWorker(
+            self.auth_mode,
+            host,
+            self.saved_port,
+            self.last_bind_user,
+            self.last_bind_password,
+            objects,
+            target_dn,
+        )
         self._move_worker.moveToThread(self._move_thread)
 
         self._move_thread.started.connect(self._move_worker.run)
+        self._move_thread.finished.connect(self._on_move_thread_finished)
         self._move_worker.progress.connect(self._on_move_progress)
         self._move_worker.finished.connect(self._on_move_finished)
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.statusBar().showMessage("Move operation in progress...")
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         self._move_thread.start()
 
     def move_selected_objects(self) -> None:
