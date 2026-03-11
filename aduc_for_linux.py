@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import csv
 import json
 import os
 import ssl
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QAbstractItemView,
     QFormLayout,
     QHBoxLayout,
@@ -3078,6 +3080,58 @@ class MainWindow(QMainWindow):
     def copy_text_to_clipboard(self, text: str) -> None:
         QApplication.clipboard().setText(text)
 
+    def export_table_list(self) -> None:
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "Export List", "There are no visible objects to export.")
+            return
+
+        default_name = "aduc-export.csv"
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export List",
+            default_name,
+            "CSV files (*.csv);;Text files (*.txt)",
+        )
+        if not file_path:
+            return
+
+        ext = os.path.splitext(file_path)[1].lower()
+        use_csv = "*.csv" in selected_filter or ext == ".csv"
+
+        headers: list[str] = []
+        for col in range(self.table.columnCount()):
+            header_item = self.table.horizontalHeaderItem(col)
+            headers.append(header_item.text() if header_item else f"Column {col + 1}")
+
+        rows: list[list[str]] = []
+        for row in range(self.table.rowCount()):
+            row_values: list[str] = []
+            for col in range(self.table.columnCount()):
+                cell = self.table.item(row, col)
+                row_values.append(cell.text() if cell else "")
+            rows.append(row_values)
+
+        try:
+            if use_csv:
+                if ext != ".csv":
+                    file_path = f"{file_path}.csv"
+                with open(file_path, "w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(headers)
+                    writer.writerows(rows)
+            else:
+                if ext != ".txt":
+                    file_path = f"{file_path}.txt"
+                with open(file_path, "w", encoding="utf-8") as handle:
+                    handle.write("\t".join(headers) + "\n")
+                    for row_values in rows:
+                        handle.write("\t".join(row_values) + "\n")
+        except OSError as e:
+            self.show_error("Export List failed", str(e))
+            return
+
+        QMessageBox.information(self, "Export List", f"Exported {len(rows)} entries to:\n{file_path}")
+
     def selected_table_objects(self) -> list[LdapObject]:
         selected_rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
         selected_objects: list[LdapObject] = []
@@ -3345,9 +3399,10 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        properties_action = menu.addAction("Properties")
-        refresh_action = menu.addAction("Refresh")
-        search_action = menu.addAction("Find...")
+        delegate_action = menu.addAction("Delegate Control")
+        find_action = menu.addAction("Find...")
+        menu.addSeparator()
+
         if obj.is_container:
             _, create_actions = self.add_new_submenu(menu, obj.dn)
         else:
@@ -3356,28 +3411,33 @@ class MainWindow(QMainWindow):
         create_group_action = create_actions.get("group")
         create_computer_action = create_actions.get("computer")
         create_ou_action = create_actions.get("organizational_unit")
-        copy_dn_action = menu.addAction("Copy Distinguished Name")
 
-        expand_action = None
-        if obj.is_container:
-            expand_action = menu.addAction("Expand")
+        all_tasks_menu = menu.addMenu("All Tasks")
+        copy_dn_action = all_tasks_menu.addAction("Copy Distinguished Name")
+        expand_action = all_tasks_menu.addAction("Expand") if obj.is_container else None
+
+        menu.addSeparator()
+        view_menu = menu.addMenu("View")
+        details_action = view_menu.addAction("Details")
+        details_action.setEnabled(False)
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("Refresh")
+        export_list_action = menu.addAction("Export List")
+
+        menu.addSeparator()
+        properties_action = menu.addAction("Properties")
+
+        menu.addSeparator()
+        help_action = menu.addAction("Help")
 
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if not chosen:
             return
 
-        if chosen == properties_action:
-            self.open_properties(obj)
-        elif chosen == refresh_action:
-            if obj.is_container:
-                data = item.data(0, Qt.UserRole) or {}
-                data["loaded"] = False
-                item.setData(0, Qt.UserRole, data)
-                while item.childCount():
-                    item.takeChild(0)
-                self.load_tree_children(item)
-                self.populate_main_pane(obj.dn, add_history=False)
-        elif chosen == search_action:
+        if chosen == delegate_action:
+            QMessageBox.information(self, "Delegate Control", "Delegate Control is not implemented yet.")
+        elif chosen == find_action:
             dlg = SearchDialog(obj.dn, self)
             if dlg.exec() == QDialog.Accepted:
                 self.run_search(obj.dn, dlg.term(), search_mode=dlg.search_mode())
@@ -3402,6 +3462,21 @@ class MainWindow(QMainWindow):
         elif expand_action is not None and chosen == expand_action:
             self.load_tree_children(item)
             QTimer.singleShot(0, lambda i=item: self.tree.expandItem(i))
+        elif chosen == refresh_action:
+            if obj.is_container:
+                data = item.data(0, Qt.UserRole) or {}
+                data["loaded"] = False
+                item.setData(0, Qt.UserRole, data)
+                while item.childCount():
+                    item.takeChild(0)
+                self.load_tree_children(item)
+                self.populate_main_pane(obj.dn, add_history=False)
+        elif chosen == export_list_action:
+            self.export_table_list()
+        elif chosen == properties_action:
+            self.open_properties(obj)
+        elif chosen == help_action:
+            QMessageBox.information(self, "Help", "Help topics are not implemented yet.")
 
     def on_table_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
@@ -3439,6 +3514,7 @@ class MainWindow(QMainWindow):
         delete_action = menu.addAction("Delete")
 
         copy_dn_action = menu.addAction("Copy Distinguished Name")
+        export_list_action = menu.addAction("Export List")
 
         open_action = None
         if is_single and obj.is_container:
@@ -3494,6 +3570,8 @@ class MainWindow(QMainWindow):
         elif chosen == copy_dn_action:
             dns = [selected_obj.dn for selected_obj in selected_objects]
             self.copy_text_to_clipboard("\n".join(dns))
+        elif chosen == export_list_action:
+            self.export_table_list()
         elif open_action is not None and chosen == open_action:
             self.populate_main_pane(obj.dn)
             tree_item = self.find_tree_item_by_dn(obj.dn)
