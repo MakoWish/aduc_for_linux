@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, Signal, Qt, QTimer
+from PySide6.QtCore import QMimeData, QPoint, Signal, Qt, QTimer, QEventLoop
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -316,6 +316,11 @@ def icon_for_directory_object(style, obj: LdapObject) -> QIcon:
     icon = QIcon.fromTheme("text-x-generic")
     return icon if not icon.isNull() else style.standardIcon(QStyle.SP_FileIcon)
 
+def icon_for_object_classes(style, object_classes: list[str], has_child_ou: bool = False) -> QIcon:
+    classes = [str(cls).lower() for cls in object_classes]
+    obj = LdapObject(dn="", name="", object_classes=classes, has_child_ou=has_child_ou)
+    return icon_for_directory_object(style, obj)
+
 
 def add_user_state_overlays(base_icon: QIcon, obj: "LdapObject", size: int = 16) -> QIcon:
     """Overlay state badges onto user icons (disabled / locked)."""
@@ -526,6 +531,25 @@ class LdapManager:
                 contexts.append(value)
 
         return contexts
+
+    def get_default_naming_context(self) -> Optional[str]:
+        partitions = self.get_directory_partitions()
+        default_nc = partitions.get("default_naming_context")
+        if isinstance(default_nc, str) and default_nc.strip():
+            return default_nc.strip()
+
+        naming_contexts = self.get_naming_contexts()
+        for context in naming_contexts:
+            value = str(context).strip()
+            if value and value.upper().startswith("DC="):
+                return value
+
+        for context in naming_contexts:
+            value = str(context).strip()
+            if value:
+                return value
+
+        return None
 
     def get_directory_partitions(self) -> dict[str, Any]:
         empty_partitions = {
@@ -1141,6 +1165,30 @@ class LdapManager:
         rdn_type, _ = parts[0].split("=", 1)
         new_rdn = f"{rdn_type}={new_name}"
         ok = self.conn.modify_dn(dn, new_rdn)
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
+    @staticmethod
+    def parent_dn(dn: str) -> Optional[str]:
+        parts = [p.strip() for p in dn.split(",") if p.strip()]
+        if len(parts) <= 1:
+            return None
+        return ",".join(parts[1:])
+
+    def move_object(self, dn: str, target_parent_dn: str) -> None:
+        if not self.conn:
+            return
+
+        parts = [p.strip() for p in dn.split(",") if p.strip()]
+        if not parts or "=" not in parts[0]:
+            raise ValueError("Invalid distinguished name")
+
+        current_parent = self.parent_dn(dn)
+        if current_parent and current_parent.lower() == target_parent_dn.lower():
+            return
+
+        rdn = parts[0]
+        ok = self.conn.modify_dn(dn, rdn, new_superior=target_parent_dn)
         if not ok:
             raise ValueError(str(self.conn.result))
 
@@ -2446,6 +2494,239 @@ class DirectoryTableWidget(QTableWidget):
         return decoded
 
 
+class DirectoryTreeWidget(QTreeWidget):
+    directory_move_drop = Signal(str, list)
+
+    DRAG_MIME_TYPE = DirectoryTableWidget.DRAG_MIME_TYPE
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self._hover_drop_item: Optional[QTreeWidgetItem] = None
+
+    def _set_hover_drop_item(self, item: Optional[QTreeWidgetItem]) -> None:
+        if self._hover_drop_item is item:
+            return
+
+        if self._hover_drop_item is not None:
+            self._hover_drop_item.setBackground(0, QBrush())
+
+        self._hover_drop_item = item
+
+        if self._hover_drop_item is not None:
+            self._hover_drop_item.setBackground(0, QBrush(QColor("#CFE8FF")))
+
+    def dragEnterEvent(self, event) -> None:
+        if self._can_accept_drop(event):
+            item = self.itemAt(event.position().toPoint())
+            self._set_hover_drop_item(item)
+            event.acceptProposedAction()
+            return
+        self._set_hover_drop_item(None)
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._can_accept_drop(event):
+            item = self.itemAt(event.position().toPoint())
+            self._set_hover_drop_item(item)
+            event.acceptProposedAction()
+            return
+        self._set_hover_drop_item(None)
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._set_hover_drop_item(None)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if not self._can_accept_drop(event):
+            self._set_hover_drop_item(None)
+            event.ignore()
+            return
+
+        item = self.itemAt(event.position().toPoint())
+        if not item:
+            self._set_hover_drop_item(None)
+            event.ignore()
+            return
+
+        data = item.data(0, Qt.UserRole) or {}
+        target_dn = str(data.get("dn", "")).strip()
+        if not target_dn or not bool(data.get("container", False)):
+            event.ignore()
+            return
+
+        payload = self._decode_drop_payload(event)
+        if not payload:
+            self._set_hover_drop_item(None)
+            event.ignore()
+            return
+
+        self.directory_move_drop.emit(target_dn, payload)
+        self._set_hover_drop_item(None)
+        event.acceptProposedAction()
+
+    def _can_accept_drop(self, event) -> bool:
+        item = self.itemAt(event.position().toPoint())
+        if not item:
+            return False
+
+        data = item.data(0, Qt.UserRole) or {}
+        if not bool(data.get("container", False)):
+            return False
+
+        payload = self._decode_drop_payload(event)
+        return bool(payload)
+
+    def _decode_drop_payload(self, event) -> list[dict[str, str]]:
+        mime = event.mimeData()
+        if not mime or not mime.hasFormat(self.DRAG_MIME_TYPE):
+            return []
+
+        try:
+            raw = bytes(mime.data(self.DRAG_MIME_TYPE))
+            parsed = json.loads(raw.decode("utf-8"))
+        except Exception:
+            return []
+
+        decoded: list[dict[str, str]] = []
+        if not isinstance(parsed, list):
+            return decoded
+
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            dn = str(entry.get("dn", "")).strip()
+            obj_type = str(entry.get("type", "")).strip()
+            if not dn:
+                continue
+            decoded.append({"dn": dn, "type": obj_type})
+        return decoded
+
+
+class MoveObjectDialog(QDialog):
+    def __init__(self, ldap: LdapManager, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self.ldap = ldap
+        self.setWindowTitle(title)
+        self.resize(520, 520)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabel("Move object to")
+        self.tree.setExpandsOnDoubleClick(True)
+        self.tree.itemExpanded.connect(self.on_item_expanded)
+        self.tree.currentItemChanged.connect(self.on_current_item_changed)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.ok_button = self.buttons.button(QDialogButtonBox.Ok)
+        if self.ok_button is not None:
+            self.ok_button.setEnabled(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.tree)
+        layout.addWidget(self.buttons)
+
+        self.populate_roots()
+
+    def populate_roots(self) -> None:
+        self.tree.clear()
+        try:
+            contexts = self.ldap.get_naming_contexts()
+        except Exception:
+            contexts = []
+
+        if not contexts:
+            default_context = self.ldap.get_default_naming_context()
+            if default_context:
+                contexts = [default_context]
+
+        for dn in contexts:
+            item = QTreeWidgetItem([dn])
+            item.setData(
+                0,
+                Qt.UserRole,
+                {
+                    "dn": dn,
+                    "loaded": False,
+                    "container": False,
+                    "object_classes": ["domain"],
+                },
+            )
+            item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            item.setIcon(0, icon_for_object_classes(self.style(), ["domain"], has_child_ou=True))
+            self.tree.addTopLevelItem(item)
+            self.load_tree_children(item)
+            item.setExpanded(True)
+
+    def load_tree_children(self, item: QTreeWidgetItem) -> None:
+        data = item.data(0, Qt.UserRole) or {}
+        if data.get("loaded", False):
+            return
+
+        dn = str(data.get("dn", "")).strip()
+        if not dn:
+            return
+
+        try:
+            children = self.ldap.list_children(dn)
+        except Exception:
+            children = []
+
+        while item.childCount():
+            item.takeChild(0)
+
+        for child in children:
+            if not child.is_container:
+                continue
+            child_item = QTreeWidgetItem([child.name])
+            child_item.setData(
+                0,
+                Qt.UserRole,
+                {
+                    "dn": child.dn,
+                    "loaded": False,
+                    "container": True,
+                    "object_classes": child.object_classes,
+                },
+            )
+            child_item.setIcon(0, icon_for_directory_object(self.style(), child))
+            child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            item.addChild(child_item)
+
+        data["loaded"] = True
+        item.setData(0, Qt.UserRole, data)
+
+    def on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        self.load_tree_children(item)
+
+    def on_current_item_changed(self, current: Optional[QTreeWidgetItem], _previous: Optional[QTreeWidgetItem]) -> None:
+        can_accept = False
+        if current is not None:
+            data = current.data(0, Qt.UserRole) or {}
+            object_classes = {str(cls).lower() for cls in data.get("object_classes", [])}
+            can_accept = bool({"organizationalunit", "container", "builtindomain"} & object_classes)
+
+        if self.ok_button is not None:
+            self.ok_button.setEnabled(can_accept)
+
+    def selected_target_dn(self) -> Optional[str]:
+        item = self.tree.currentItem()
+        if not item:
+            return None
+
+        data = item.data(0, Qt.UserRole) or {}
+        object_classes = {str(cls).lower() for cls in data.get("object_classes", [])}
+        if not ({"organizationalunit", "container", "builtindomain"} & object_classes):
+            return None
+
+        dn = str(data.get("dn", "")).strip()
+        return dn or None
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2466,12 +2747,13 @@ class MainWindow(QMainWindow):
         self.main_splitter_sizes: list[int] = []
         self.show_advanced_features = True
         self.current_dn: Optional[str] = None
+        self.pending_auto_connect = False
         self.load_settings()
 
         if self.window_size:
             self.resize(*self.window_size)
 
-        self.tree = QTreeWidget()
+        self.tree = DirectoryTreeWidget()
         self.tree.setHeaderLabel("Active Directory")
         self.tree.setExpandsOnDoubleClick(False)
         self.tree.itemClicked.connect(self.on_tree_clicked)
@@ -2493,6 +2775,7 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_table_context_menu)
         self.table.group_membership_drop.connect(self.on_group_membership_drop)
+        self.tree.directory_move_drop.connect(self.on_directory_move_drop)
         self.table.itemSelectionChanged.connect(self.update_status_bar)
 
         self.apply_saved_main_table_widths()
@@ -2588,6 +2871,35 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
 
         if self.auto_connect and self.saved_host:
+            self.pending_auto_connect = True
+
+    def center_dialog_over_main_window(self, dialog: QDialog) -> None:
+        if not self.isVisible():
+            return
+
+        dialog.adjustSize()
+
+        window_center_global = self.mapToGlobal(self.rect().center())
+        screen = QApplication.screenAt(window_center_global)
+        if screen is None:
+            screen = self.screen() or QApplication.primaryScreen()
+
+        dialog_rect = dialog.frameGeometry()
+        dialog_rect.moveCenter(window_center_global)
+        top_left = dialog_rect.topLeft()
+
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = max(available.left(), min(top_left.x(), available.right() - dialog_rect.width() + 1))
+            y = max(available.top(), min(top_left.y(), available.bottom() - dialog_rect.height() + 1))
+            top_left = QPoint(x, y)
+
+        dialog.move(top_left)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.pending_auto_connect:
+            self.pending_auto_connect = False
             QTimer.singleShot(0, self.auto_connect_if_configured)
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
@@ -2691,11 +3003,20 @@ class MainWindow(QMainWindow):
     def run_with_loading(self, message: str, action) -> None:
         loading = QProgressDialog(message, None, 0, 0, self)
         loading.setWindowTitle("Please wait")
-        loading.setWindowModality(Qt.ApplicationModal)
+        loading.setWindowModality(Qt.WindowModal)
+        loading.setWindowFlag(Qt.Dialog, True)
         loading.setCancelButton(None)
         loading.setMinimumDuration(0)
+        loading.setAutoClose(False)
+        loading.setAutoReset(False)
+
+        loading.setParent(self, Qt.Dialog)
+        loading.ensurePolished()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        self.center_dialog_over_main_window(loading)
         loading.show()
-        QApplication.processEvents()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        self.center_dialog_over_main_window(loading)
 
         try:
             action()
@@ -3205,6 +3526,151 @@ class MainWindow(QMainWindow):
             self.show_error("Delete failed", "\n".join(failures))
         self.refresh_current()
 
+    @staticmethod
+    def _display_name_from_dn(dn: str) -> str:
+        first_rdn = dn.split(",", 1)[0].strip()
+        if "=" in first_rdn:
+            return first_rdn.split("=", 1)[1].strip() or dn
+        return dn
+
+    def confirm_move_objects(self, objects: list[LdapObject], target_dn: str) -> bool:
+        if not objects:
+            return False
+
+        target_name = self._display_name_from_dn(target_dn)
+        if len(objects) == 1:
+            obj = objects[0]
+            message = f"Are you sure you want to move {obj.name} to {target_name}?"
+        else:
+            message = f"Are you sure you want to move {len(objects)} objects to {target_name}?"
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm move",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def move_objects_to_container(self, objects: list[LdapObject], target_dn: str) -> None:
+        if not objects:
+            return
+
+        normalized_target = target_dn.strip().lower()
+        failures: list[str] = []
+        moved_count = 0
+
+        for obj in objects:
+            current_parent = self.ldap.parent_dn(obj.dn)
+            if not current_parent:
+                failures.append(f"{obj.name}: object has no movable parent")
+                continue
+            if current_parent.lower() == normalized_target:
+                continue
+            if obj.dn.strip().lower() == normalized_target:
+                failures.append(f"{obj.name}: cannot move an object into itself")
+                continue
+            if normalized_target.endswith("," + obj.dn.strip().lower()):
+                failures.append(f"{obj.name}: cannot move an object into its own subtree")
+                continue
+
+            try:
+                self.ldap.move_object(obj.dn, target_dn)
+                moved_count += 1
+            except Exception as e:
+                failures.append(f"{obj.dn}: {e}")
+
+        if failures:
+            self.show_error("Move failed", "\n".join(failures))
+
+        if moved_count > 0:
+            self.refresh_current()
+
+    def move_selected_objects(self) -> None:
+        selected_objects = self.selected_table_objects()
+        if not selected_objects:
+            return
+
+        try:
+            dlg = MoveObjectDialog(self.ldap, "Move", self)
+            dlg.setWindowModality(Qt.WindowModal)
+            dlg.ensurePolished()
+            self.center_dialog_over_main_window(dlg)
+            if dlg.exec() != QDialog.Accepted:
+                return
+        except Exception as e:
+            self.show_error("Move", f"Unable to open Move dialog: {e}")
+            return
+
+        target_dn = dlg.selected_target_dn()
+        if not target_dn:
+            return
+
+        if not self.confirm_move_objects(selected_objects, target_dn):
+            return
+
+        self.move_objects_to_container(selected_objects, target_dn)
+
+    def add_selected_objects_to_group(self) -> None:
+        selected_objects = self.selected_table_objects()
+        if not selected_objects:
+            return
+
+        search_base = self.current_dn or (self.ldap.get_default_naming_context() or "")
+        if not search_base:
+            return
+
+        dlg = SelectDirectoryObjectsDialog(self.ldap, search_base, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        selected_groups = [obj for obj in dlg.selected_objects() if obj.object_type == "Group"]
+        if not selected_groups:
+            QMessageBox.information(self, "Add to group", "Select at least one group.")
+            return
+
+        failures: list[str] = []
+        added_count = 0
+        for group_obj in selected_groups:
+            for member_obj in selected_objects:
+                if member_obj.dn == group_obj.dn:
+                    continue
+                try:
+                    self.ldap.add_group_member(group_obj.dn, member_obj.dn)
+                    added_count += 1
+                except Exception as e:
+                    if "entryAlreadyExists" in str(e):
+                        continue
+                    failures.append(f"{member_obj.name} -> {group_obj.name}: {e}")
+
+        if failures:
+            self.show_error("Add to group failed", "\n".join(failures))
+
+        if added_count > 0:
+            self.refresh_current()
+
+    def on_directory_move_drop(self, target_dn: str, payload: list[dict[str, str]]) -> None:
+        selected_dns = [str(entry.get("dn", "")).strip() for entry in payload]
+        selected_dns = [dn for dn in selected_dns if dn]
+        if not selected_dns:
+            return
+
+        objects: list[LdapObject] = []
+        for dn in selected_dns:
+            obj = self.ldap.get_object_summary(dn)
+            if obj is not None:
+                objects.append(obj)
+
+        if not objects:
+            self.statusBar().showMessage("Unable to resolve dragged directory objects.")
+            return
+
+        if not self.confirm_move_objects(objects, target_dn):
+            return
+
+        self.move_objects_to_container(objects, target_dn)
+
     def create_ou_in_current(self) -> None:
         if not self.current_dn:
             return
@@ -3507,14 +3973,49 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        properties_action = menu.addAction("Properties")
-        properties_action.setEnabled(is_single)
-        rename_action = menu.addAction("Rename")
-        rename_action.setEnabled(is_single)
+        add_to_group_action = None
+        if any(o.object_type in {"User", "Computer", "Group"} for o in selected_objects):
+            add_to_group_action = menu.addAction("Add to group...")
+
+        disable_action = None
+        reset_password_action = None
+        selected_users = [o for o in selected_objects if o.object_type == "User"]
+        selected_computers = [o for o in selected_objects if o.object_type == "Computer"]
+        disabled_users = [o for o in selected_users if o.user_disabled]
+        enabled_users = [o for o in selected_users if not o.user_disabled]
+        disabled_computers = [o for o in selected_computers if o.computer_disabled]
+        enabled_computers = [o for o in selected_computers if not o.computer_disabled]
+
+        if enabled_users or enabled_computers:
+            disable_action = menu.addAction("Disable Account")
+
+        if len(selected_users) == 1 and is_single:
+            reset_password_action = menu.addAction("Reset Account")
+
+        move_action = menu.addAction("Move...")
+        manage_action = menu.addAction("Manage")
+
+        menu.addSeparator()
+        all_tasks_menu = menu.addMenu("All Tasks")
+        all_tasks_menu.addAction("Find...").setEnabled(False)
+
+        menu.addSeparator()
+        cut_action = menu.addAction("Cut")
         delete_action = menu.addAction("Delete")
 
-        copy_dn_action = menu.addAction("Copy Distinguished Name")
-        export_list_action = menu.addAction("Export List")
+        menu.addSeparator()
+        properties_action = menu.addAction("Properties")
+        properties_action.setEnabled(is_single)
+        properties_font = properties_action.font()
+        properties_font.setBold(True)
+        properties_action.setFont(properties_font)
+
+        menu.addSeparator()
+        help_action = menu.addAction("Help")
+
+        copy_dn_action = None
+        export_list_action = None
+        rename_action = None
 
         open_action = None
         if is_single and obj.is_container:
@@ -3532,46 +4033,46 @@ class MainWindow(QMainWindow):
             new_ou_action = None
 
         enable_action = None
-        disable_action = None
         unlock_action = None
-        reset_password_action = None
-        selected_users = [o for o in selected_objects if o.object_type == "User"]
-        selected_computers = [o for o in selected_objects if o.object_type == "Computer"]
-        disabled_users = [o for o in selected_users if o.user_disabled]
-        enabled_users = [o for o in selected_users if not o.user_disabled]
-        disabled_computers = [o for o in selected_computers if o.computer_disabled]
-        enabled_computers = [o for o in selected_computers if not o.computer_disabled]
         if selected_users:
-            menu.addSeparator()
-            if len(selected_users) == 1 and is_single:
-                reset_password_action = menu.addAction("Reset Password")
             if disabled_users:
                 enable_action = menu.addAction("Enable")
-            if enabled_users:
-                disable_action = menu.addAction("Disable")
             unlock_action = menu.addAction("Unlock Account")
-        elif selected_computers:
-            menu.addSeparator()
-            if disabled_computers:
-                enable_action = menu.addAction("Enable")
-            if enabled_computers:
-                disable_action = menu.addAction("Disable")
+        elif selected_computers and disabled_computers:
+            enable_action = menu.addAction("Enable")
 
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if not chosen:
             return
 
-        if chosen == properties_action:
-            self.open_properties(obj)
-        elif chosen == rename_action:
-            self.rename_selected_object()
+        if add_to_group_action is not None and chosen == add_to_group_action:
+            self.add_selected_objects_to_group()
+        elif disable_action is not None and chosen == disable_action:
+            failed_dns: list[str] = []
+            targets = selected_users if selected_users else selected_computers
+            for target_obj in targets:
+                try:
+                    self.ldap.set_user_enabled(target_obj.dn, False)
+                except Exception:
+                    failed_dns.append(target_obj.dn)
+            if failed_dns:
+                self.show_error("Disable failed", "\n".join(failed_dns))
+                return
+            self.refresh_current()
+        elif reset_password_action is not None and chosen == reset_password_action:
+            self.reset_password_for_object(obj)
+        elif chosen == move_action:
+            self.move_selected_objects()
+        elif chosen == manage_action:
+            QMessageBox.information(self, "Manage", "Manage is not implemented yet.")
+        elif chosen == cut_action:
+            QMessageBox.information(self, "Cut", "Cut is not implemented yet.")
         elif chosen == delete_action:
             self.delete_selected_objects()
-        elif chosen == copy_dn_action:
-            dns = [selected_obj.dn for selected_obj in selected_objects]
-            self.copy_text_to_clipboard("\n".join(dns))
-        elif chosen == export_list_action:
-            self.export_table_list()
+        elif chosen == properties_action:
+            self.open_properties(obj)
+        elif chosen == help_action:
+            QMessageBox.information(self, "Help", "Help topics are not implemented yet.")
         elif open_action is not None and chosen == open_action:
             self.populate_main_pane(obj.dn)
             tree_item = self.find_tree_item_by_dn(obj.dn)
@@ -3595,8 +4096,6 @@ class MainWindow(QMainWindow):
                     self.show_error("Create OU failed", str(e))
                     return
                 self.refresh_current()
-        elif reset_password_action is not None and chosen == reset_password_action:
-            self.reset_password_for_object(obj)
         elif enable_action is not None and chosen == enable_action:
             failed_dns: list[str] = []
             targets = selected_users if selected_users else selected_computers
@@ -3607,18 +4106,6 @@ class MainWindow(QMainWindow):
                     failed_dns.append(target_obj.dn)
             if failed_dns:
                 self.show_error("Enable failed", "\n".join(failed_dns))
-                return
-            self.refresh_current()
-        elif disable_action is not None and chosen == disable_action:
-            failed_dns: list[str] = []
-            targets = selected_users if selected_users else selected_computers
-            for target_obj in targets:
-                try:
-                    self.ldap.set_user_enabled(target_obj.dn, False)
-                except Exception:
-                    failed_dns.append(target_obj.dn)
-            if failed_dns:
-                self.show_error("Disable failed", "\n".join(failed_dns))
                 return
             self.refresh_current()
         elif unlock_action is not None and chosen == unlock_action:
