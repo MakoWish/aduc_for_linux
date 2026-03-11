@@ -1,8 +1,14 @@
 # ADUC for Linux
 
+Python implementation of Microsoft's **Active Directory Users and Computers (ADUC)** for Linux desktops.
+
 <img src="image.png" width="150" alt="ADUC for Linux icon">
 
-Python implementation of Microsoft's **Active Directory Users and Computers (ADUC)** for Linux desktops.
+## Index
+
+[About](#about)
+[Features](#features--current-)
+
 
 ## About
 
