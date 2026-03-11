@@ -1727,9 +1727,10 @@ class UserPropertiesDialog(QDialog):
         return dns
 
     def add_group_memberships(self) -> None:
+        group_search_base = self.ldap.get_default_naming_context() or self.search_base
         dlg = SelectDirectoryObjectsDialog(
             self.ldap,
-            self.search_base,
+            group_search_base,
             self,
             search_options=[("Groups", SEARCH_FILTER_GROUPS)],
         )
