@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, QPoint, Signal, Qt, QTimer
+from PySide6.QtCore import QMimeData, QPoint, Signal, Qt, QTimer, QEventLoop
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -2583,7 +2583,16 @@ class MoveObjectDialog(QDialog):
 
     def populate_roots(self) -> None:
         self.tree.clear()
-        contexts = self.ldap.get_naming_contexts()
+        try:
+            contexts = self.ldap.get_naming_contexts()
+        except Exception:
+            contexts = []
+
+        if not contexts:
+            default_context = self.ldap.get_default_naming_context()
+            if default_context:
+                contexts = [default_context]
+
         for dn in contexts:
             item = QTreeWidgetItem([dn])
             item.setData(
@@ -2817,12 +2826,17 @@ class MainWindow(QMainWindow):
         if not self.isVisible():
             return
 
-        parent_center = self.frameGeometry().center()
+        dialog.adjustSize()
+
+        window_center_global = self.mapToGlobal(self.rect().center())
+        screen = QApplication.screenAt(window_center_global)
+        if screen is None:
+            screen = self.screen() or QApplication.primaryScreen()
+
         dialog_rect = dialog.frameGeometry()
-        dialog_rect.moveCenter(parent_center)
+        dialog_rect.moveCenter(window_center_global)
         top_left = dialog_rect.topLeft()
 
-        screen = self.screen() or QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
             x = max(available.left(), min(top_left.x(), available.right() - dialog_rect.width() + 1))
@@ -2939,13 +2953,19 @@ class MainWindow(QMainWindow):
         loading = QProgressDialog(message, None, 0, 0, self)
         loading.setWindowTitle("Please wait")
         loading.setWindowModality(Qt.WindowModal)
+        loading.setWindowFlag(Qt.Dialog, True)
         loading.setCancelButton(None)
         loading.setMinimumDuration(0)
         loading.setAutoClose(False)
         loading.setAutoReset(False)
+
+        loading.setParent(self, Qt.Dialog)
+        loading.ensurePolished()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         self.center_dialog_over_main_window(loading)
         loading.show()
-        QApplication.processEvents()
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        self.center_dialog_over_main_window(loading)
 
         try:
             action()
@@ -3495,6 +3515,9 @@ class MainWindow(QMainWindow):
             return
 
         dlg = MoveObjectDialog(self.ldap, "Move", self)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.ensurePolished()
+        self.center_dialog_over_main_window(dlg)
         if dlg.exec() != QDialog.Accepted:
             return
 
