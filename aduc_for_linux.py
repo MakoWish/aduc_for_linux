@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, QPoint, Signal, Qt, QTimer, QEventLoop
+from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -2727,6 +2727,46 @@ class MoveObjectDialog(QDialog):
         return dn or None
 
 
+class MoveOperationWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(int, list)
+
+    def __init__(self, ldap: LdapManager, objects: list[LdapObject], target_dn: str) -> None:
+        super().__init__()
+        self.ldap = ldap
+        self.objects = objects
+        self.target_dn = target_dn
+
+    def run(self) -> None:
+        normalized_target = self.target_dn.strip().lower()
+        failures: list[str] = []
+        moved_count = 0
+
+        for index, obj in enumerate(self.objects, start=1):
+            self.progress.emit(index, len(self.objects), obj.name)
+
+            current_parent = self.ldap.parent_dn(obj.dn)
+            if not current_parent:
+                failures.append(f"{obj.name}: object has no movable parent")
+                continue
+            if current_parent.lower() == normalized_target:
+                continue
+            if obj.dn.strip().lower() == normalized_target:
+                failures.append(f"{obj.name}: cannot move an object into itself")
+                continue
+            if normalized_target.endswith("," + obj.dn.strip().lower()):
+                failures.append(f"{obj.name}: cannot move an object into its own subtree")
+                continue
+
+            try:
+                self.ldap.move_object(obj.dn, self.target_dn)
+                moved_count += 1
+            except Exception as e:
+                failures.append(f"{obj.dn}: {e}")
+
+        self.finished.emit(moved_count, failures)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2748,6 +2788,9 @@ class MainWindow(QMainWindow):
         self.show_advanced_features = True
         self.current_dn: Optional[str] = None
         self.pending_auto_connect = False
+        self._move_thread: Optional[QThread] = None
+        self._move_worker: Optional[MoveOperationWorker] = None
+        self._move_progress_dialog: Optional[QProgressDialog] = None
         self.load_settings()
 
         if self.window_size:
@@ -3553,64 +3596,65 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.Yes
 
-    def move_objects_to_container(self, objects: list[LdapObject], target_dn: str) -> None:
-        if not objects:
+    def _on_move_progress(self, index: int, total: int, object_name: str) -> None:
+        if not self._move_progress_dialog:
             return
+        self._move_progress_dialog.setLabelText(f"Moving {index}/{total}: {object_name}")
+        self._move_progress_dialog.setValue(max(0, index - 1))
 
-        normalized_target = target_dn.strip().lower()
-        failures: list[str] = []
-        moved_count = 0
+    def _on_move_finished(self, moved_count: int, failures: list[str]) -> None:
+        if self._move_progress_dialog:
+            self._move_progress_dialog.setValue(self._move_progress_dialog.maximum())
+            self._move_progress_dialog.close()
+            self._move_progress_dialog.deleteLater()
+            self._move_progress_dialog = None
 
-        loading = QProgressDialog("Preparing move operation...", None, 0, len(objects), self)
-        loading.setWindowTitle("Moving objects")
-        loading.setWindowModality(Qt.WindowModal)
-        loading.setWindowFlag(Qt.Dialog, True)
-        loading.setCancelButton(None)
-        loading.setMinimumDuration(0)
-        loading.setAutoClose(False)
-        loading.setAutoReset(False)
-        loading.setParent(self, Qt.Dialog)
-        loading.ensurePolished()
-        self.center_dialog_over_main_window(loading)
-        loading.show()
-        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        QApplication.restoreOverrideCursor()
 
-        try:
-            with self.busy_cursor():
-                for index, obj in enumerate(objects, start=1):
-                    loading.setLabelText(f"Moving {index}/{len(objects)}: {obj.name}")
-                    loading.setValue(index - 1)
-                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-
-                    current_parent = self.ldap.parent_dn(obj.dn)
-                    if not current_parent:
-                        failures.append(f"{obj.name}: object has no movable parent")
-                        continue
-                    if current_parent.lower() == normalized_target:
-                        continue
-                    if obj.dn.strip().lower() == normalized_target:
-                        failures.append(f"{obj.name}: cannot move an object into itself")
-                        continue
-                    if normalized_target.endswith("," + obj.dn.strip().lower()):
-                        failures.append(f"{obj.name}: cannot move an object into its own subtree")
-                        continue
-
-                    try:
-                        self.ldap.move_object(obj.dn, target_dn)
-                        moved_count += 1
-                    except Exception as e:
-                        failures.append(f"{obj.dn}: {e}")
-
-                loading.setValue(len(objects))
-                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-        finally:
-            loading.close()
+        if self._move_thread:
+            self._move_thread.quit()
+            self._move_thread.wait()
+            self._move_thread.deleteLater()
+            self._move_thread = None
+        self._move_worker = None
 
         if failures:
             self.show_error("Move failed", "\n".join(failures))
 
         if moved_count > 0:
             self.refresh_current()
+
+    def move_objects_to_container(self, objects: list[LdapObject], target_dn: str) -> None:
+        if not objects:
+            return
+        if self._move_thread is not None:
+            self.statusBar().showMessage("A move operation is already in progress. Please wait.")
+            return
+
+        progress = QProgressDialog("Preparing move operation...", None, 0, len(objects), self)
+        progress.setWindowTitle("Moving objects")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setWindowFlag(Qt.Dialog, True)
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setParent(self, Qt.Dialog)
+        progress.ensurePolished()
+        self.center_dialog_over_main_window(progress)
+        progress.show()
+
+        self._move_progress_dialog = progress
+        self._move_thread = QThread(self)
+        self._move_worker = MoveOperationWorker(self.ldap, objects, target_dn)
+        self._move_worker.moveToThread(self._move_thread)
+
+        self._move_thread.started.connect(self._move_worker.run)
+        self._move_worker.progress.connect(self._on_move_progress)
+        self._move_worker.finished.connect(self._on_move_finished)
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self._move_thread.start()
 
     def move_selected_objects(self) -> None:
         selected_objects = self.selected_table_objects()
