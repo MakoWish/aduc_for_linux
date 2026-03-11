@@ -2952,10 +2952,14 @@ class MainWindow(QMainWindow):
 
         dialog.adjustSize()
 
-        window_center_global = self.mapToGlobal(self.rect().center())
+        window_center_global = self.frameGeometry().center()
         screen = QApplication.screenAt(window_center_global)
         if screen is None:
             screen = self.screen() or QApplication.primaryScreen()
+
+        dialog_window = dialog.windowHandle()
+        if dialog_window is not None and screen is not None:
+            dialog_window.setScreen(screen)
 
         dialog_rect = dialog.frameGeometry()
         dialog_rect.moveCenter(window_center_global)
@@ -3078,6 +3082,7 @@ class MainWindow(QMainWindow):
         loading.setWindowTitle("Please wait")
         loading.setWindowModality(Qt.WindowModal)
         loading.setWindowFlag(Qt.Dialog, True)
+        loading.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         loading.setCancelButton(None)
         loading.setMinimumDuration(0)
         loading.setAutoClose(False)
@@ -3090,6 +3095,8 @@ class MainWindow(QMainWindow):
         loading.show()
         QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         self.center_dialog_over_main_window(loading)
+        QTimer.singleShot(0, lambda: self.center_dialog_over_main_window(loading))
+        QTimer.singleShot(75, lambda: self.center_dialog_over_main_window(loading))
 
         try:
             action()
