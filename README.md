@@ -7,7 +7,13 @@ Python implementation of Microsoft's **Active Directory Users and Computers (ADU
 ## Index
 
 [About](#about)  
-[Features](#features-current)
+[Features](#features-current)  
+[Requirements](#requirements)  
+[Installation](#installation)  
+[Running Manually](#running-manually-without-launcher)  
+[Configuration](#configuration)  
+[Disclaimer](#disclaimer)  
+[Donate](#domate)  
 
 ## About
 
@@ -41,7 +47,7 @@ Python dependencies are listed in `requirements.txt` and installed into a virtua
 
 ## Installation
 
-### Quick install
+### Quick Install
 
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/install.sh)
@@ -57,7 +63,7 @@ The installer will:
 4. Create a `.desktop` launcher entry.
 5. Install a local `VERSION` file used by the app startup update check.
 
-## Running manually (without launcher)
+## Running Manually (without launcher)
 
 ```bash
 python3 aduc_for_linux.py
@@ -71,32 +77,7 @@ The app stores some preference settings in:
 
 - `~/.config/aduc-linux/settings.json`
 
-## Project checks
-
-This repository now includes a minimal `Makefile` with a `check` target.
-
-Run all checks:
-
-```bash
-make check
-```
-
-Included checks:
-
-- Python syntax validation:
-  - `python3 -m py_compile aduc_for_linux.py`
-- Installer shell syntax validation:
-  - `bash -n install.sh`
-
-These checks are intentionally dependency-light, so contributors can quickly validate basic repo health before committing.
-
-## Development notes
-
-- Main application entry point: `aduc_for_linux.py`
-- Installer: `install.sh`
-- Dependencies: `requirements.txt`
-
-## Roadmap ideas
+## Roadmap Ideas
 
 Potential next improvements:
 
