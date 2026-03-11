@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import csv
 import json
 import os
 import ssl
@@ -8,6 +9,7 @@ import sys
 import urllib.error
 import urllib.request
 import webbrowser
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QAbstractItemView,
     QFormLayout,
     QHBoxLayout,
@@ -70,6 +73,13 @@ CONTAINER_CLASSES = {
 USER_CLASSES = {"user", "person", "organizationalperson"}
 GROUP_CLASSES = {"group"}
 COMPUTER_CLASSES = {"computer"}
+
+CREATABLE_CHILD_CLASS_BY_ACTION = {
+    "user": "user",
+    "group": "group",
+    "computer": "computer",
+    "organizational_unit": "organizationalunit",
+}
 
 SEARCH_FILTER_USERS_CONTACTS_GROUPS = "users_contacts_groups"
 SEARCH_FILTER_COMPUTERS = "computers"
@@ -1065,6 +1075,60 @@ class LdapManager:
         ok = self.conn.delete(dn)
         if not ok:
             raise ValueError(str(self.conn.result))
+
+    def get_allowed_child_classes(self, dn: str) -> set[str]:
+        if not self.conn:
+            return set()
+
+        self.conn.search(
+            search_base=dn,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["allowedChildClassesEffective", "allowedChildClasses"],
+        )
+        if not self.conn.entries:
+            return set()
+
+        entry = self.conn.entries[0]
+        allowed_classes: set[str] = set()
+        for attr in ("allowedChildClassesEffective", "allowedChildClasses"):
+            if attr not in entry:
+                continue
+            try:
+                values = entry[attr].values
+                if isinstance(values, list):
+                    allowed_classes.update(str(v).lower() for v in values)
+                elif values:
+                    allowed_classes.add(str(values).lower())
+            except Exception:
+                continue
+
+        return allowed_classes
+
+    def can_create_child_class(self, parent_dn: str, child_class: str) -> bool:
+        if not self.conn:
+            return False
+
+        class_name = child_class.lower()
+        probe_id = uuid.uuid4().hex
+        rdn_attr = "OU" if class_name == "organizationalunit" else "CN"
+        probe_dn = f"{rdn_attr}=__aduc_probe_{probe_id},{parent_dn}"
+
+        ok = self.conn.add(
+            probe_dn,
+            attributes={
+                "objectClass": ["top", class_name],
+            },
+        )
+        if ok:
+            self.conn.delete(probe_dn)
+            return True
+
+        result_code = int(self.conn.result.get("result", -1))
+        if result_code == 50:
+            return False
+
+        return True
 
     def rename_object(self, dn: str, new_name: str) -> None:
         if not self.conn:
@@ -3016,6 +3080,58 @@ class MainWindow(QMainWindow):
     def copy_text_to_clipboard(self, text: str) -> None:
         QApplication.clipboard().setText(text)
 
+    def export_table_list(self) -> None:
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "Export List", "There are no visible objects to export.")
+            return
+
+        default_name = "aduc-export.csv"
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export List",
+            default_name,
+            "CSV files (*.csv);;Text files (*.txt)",
+        )
+        if not file_path:
+            return
+
+        ext = os.path.splitext(file_path)[1].lower()
+        use_csv = "*.csv" in selected_filter or ext == ".csv"
+
+        headers: list[str] = []
+        for col in range(self.table.columnCount()):
+            header_item = self.table.horizontalHeaderItem(col)
+            headers.append(header_item.text() if header_item else f"Column {col + 1}")
+
+        rows: list[list[str]] = []
+        for row in range(self.table.rowCount()):
+            row_values: list[str] = []
+            for col in range(self.table.columnCount()):
+                cell = self.table.item(row, col)
+                row_values.append(cell.text() if cell else "")
+            rows.append(row_values)
+
+        try:
+            if use_csv:
+                if ext != ".csv":
+                    file_path = f"{file_path}.csv"
+                with open(file_path, "w", newline="", encoding="utf-8") as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(headers)
+                    writer.writerows(rows)
+            else:
+                if ext != ".txt":
+                    file_path = f"{file_path}.txt"
+                with open(file_path, "w", encoding="utf-8") as handle:
+                    handle.write("\t".join(headers) + "\n")
+                    for row_values in rows:
+                        handle.write("\t".join(row_values) + "\n")
+        except OSError as e:
+            self.show_error("Export List failed", str(e))
+            return
+
+        QMessageBox.information(self, "Export List", f"Exported {len(rows)} entries to:\n{file_path}")
+
     def selected_table_objects(self) -> list[LdapObject]:
         selected_rows = sorted({idx.row() for idx in self.table.selectionModel().selectedRows()})
         selected_objects: list[LdapObject] = []
@@ -3197,6 +3313,63 @@ class MainWindow(QMainWindow):
             return
         self.create_computer_under_dn(self.current_dn)
 
+    def allowed_creation_actions_for_dn(self, dn: str) -> set[str]:
+        try:
+            allowed_classes = self.ldap.get_allowed_child_classes(dn)
+        except Exception:
+            return set()
+
+        allowed_actions: set[str] = set()
+        for action_name, required_class in CREATABLE_CHILD_CLASS_BY_ACTION.items():
+            if required_class not in allowed_classes:
+                continue
+            try:
+                if self.ldap.can_create_child_class(dn, required_class):
+                    allowed_actions.add(action_name)
+            except Exception:
+                continue
+        return allowed_actions
+
+    def add_creation_actions_to_menu(
+        self,
+        menu: QMenu,
+        parent_dn: str,
+        allowed_actions: Optional[set[str]] = None,
+    ) -> dict[str, Optional[QAction]]:
+        if allowed_actions is None:
+            allowed_actions = self.allowed_creation_actions_for_dn(parent_dn)
+        actions: dict[str, Optional[QAction]] = {
+            "user": None,
+            "group": None,
+            "computer": None,
+            "organizational_unit": None,
+        }
+
+        if "user" in allowed_actions:
+            actions["user"] = menu.addAction("User")
+        if "group" in allowed_actions:
+            actions["group"] = menu.addAction("Group")
+        if "computer" in allowed_actions:
+            actions["computer"] = menu.addAction("Computer")
+        if "organizational_unit" in allowed_actions:
+            actions["organizational_unit"] = menu.addAction("Organizational Unit")
+
+        return actions
+
+    def add_new_submenu(self, menu: QMenu, parent_dn: str) -> tuple[Optional[QMenu], dict[str, Optional[QAction]]]:
+        allowed_actions = self.allowed_creation_actions_for_dn(parent_dn)
+        if not allowed_actions:
+            return None, {
+                "user": None,
+                "group": None,
+                "computer": None,
+                "organizational_unit": None,
+            }
+
+        new_menu = menu.addMenu("New")
+        create_actions = self.add_creation_actions_to_menu(new_menu, parent_dn, allowed_actions=allowed_actions)
+        return new_menu, create_actions
+
     def ldap_object_from_tree_item(self, item: QTreeWidgetItem) -> Optional[LdapObject]:
         if not item:
             return None
@@ -3226,35 +3399,45 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
-        properties_action = menu.addAction("Properties")
-        refresh_action = menu.addAction("Refresh")
-        search_action = menu.addAction("Find...")
-        create_user_action = menu.addAction("New User...") if obj.is_container else None
-        create_group_action = menu.addAction("New Group...") if obj.is_container else None
-        create_computer_action = menu.addAction("New Computer...") if obj.is_container else None
-        create_ou_action = menu.addAction("New Organizational Unit...") if obj.is_container else None
-        copy_dn_action = menu.addAction("Copy Distinguished Name")
+        delegate_action = menu.addAction("Delegate Control")
+        find_action = menu.addAction("Find...")
+        menu.addSeparator()
 
-        expand_action = None
         if obj.is_container:
-            expand_action = menu.addAction("Expand")
+            _, create_actions = self.add_new_submenu(menu, obj.dn)
+        else:
+            create_actions = {}
+        create_user_action = create_actions.get("user")
+        create_group_action = create_actions.get("group")
+        create_computer_action = create_actions.get("computer")
+        create_ou_action = create_actions.get("organizational_unit")
+
+        all_tasks_menu = menu.addMenu("All Tasks")
+        copy_dn_action = all_tasks_menu.addAction("Copy Distinguished Name")
+        expand_action = all_tasks_menu.addAction("Expand") if obj.is_container else None
+
+        menu.addSeparator()
+        view_menu = menu.addMenu("View")
+        details_action = view_menu.addAction("Details")
+        details_action.setEnabled(False)
+
+        menu.addSeparator()
+        refresh_action = menu.addAction("Refresh")
+        export_list_action = menu.addAction("Export List")
+
+        menu.addSeparator()
+        properties_action = menu.addAction("Properties")
+
+        menu.addSeparator()
+        help_action = menu.addAction("Help")
 
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if not chosen:
             return
 
-        if chosen == properties_action:
-            self.open_properties(obj)
-        elif chosen == refresh_action:
-            if obj.is_container:
-                data = item.data(0, Qt.UserRole) or {}
-                data["loaded"] = False
-                item.setData(0, Qt.UserRole, data)
-                while item.childCount():
-                    item.takeChild(0)
-                self.load_tree_children(item)
-                self.populate_main_pane(obj.dn, add_history=False)
-        elif chosen == search_action:
+        if chosen == delegate_action:
+            QMessageBox.information(self, "Delegate Control", "Delegate Control is not implemented yet.")
+        elif chosen == find_action:
             dlg = SearchDialog(obj.dn, self)
             if dlg.exec() == QDialog.Accepted:
                 self.run_search(obj.dn, dlg.term(), search_mode=dlg.search_mode())
@@ -3279,6 +3462,21 @@ class MainWindow(QMainWindow):
         elif expand_action is not None and chosen == expand_action:
             self.load_tree_children(item)
             QTimer.singleShot(0, lambda i=item: self.tree.expandItem(i))
+        elif chosen == refresh_action:
+            if obj.is_container:
+                data = item.data(0, Qt.UserRole) or {}
+                data["loaded"] = False
+                item.setData(0, Qt.UserRole, data)
+                while item.childCount():
+                    item.takeChild(0)
+                self.load_tree_children(item)
+                self.populate_main_pane(obj.dn, add_history=False)
+        elif chosen == export_list_action:
+            self.export_table_list()
+        elif chosen == properties_action:
+            self.open_properties(obj)
+        elif chosen == help_action:
+            QMessageBox.information(self, "Help", "Help topics are not implemented yet.")
 
     def on_table_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
@@ -3316,15 +3514,17 @@ class MainWindow(QMainWindow):
         delete_action = menu.addAction("Delete")
 
         copy_dn_action = menu.addAction("Copy Distinguished Name")
+        export_list_action = menu.addAction("Export List")
 
         open_action = None
         if is_single and obj.is_container:
             open_action = menu.addAction("Open")
             menu.addSeparator()
-            new_user_action = menu.addAction("New User...")
-            new_group_action = menu.addAction("New Group...")
-            new_computer_action = menu.addAction("New Computer...")
-            new_ou_action = menu.addAction("New Organizational Unit...")
+            _, create_actions = self.add_new_submenu(menu, obj.dn)
+            new_user_action = create_actions.get("user")
+            new_group_action = create_actions.get("group")
+            new_computer_action = create_actions.get("computer")
+            new_ou_action = create_actions.get("organizational_unit")
         else:
             new_user_action = None
             new_group_action = None
@@ -3370,6 +3570,8 @@ class MainWindow(QMainWindow):
         elif chosen == copy_dn_action:
             dns = [selected_obj.dn for selected_obj in selected_objects]
             self.copy_text_to_clipboard("\n".join(dns))
+        elif chosen == export_list_action:
+            self.export_table_list()
         elif open_action is not None and chosen == open_action:
             self.populate_main_pane(obj.dn)
             tree_item = self.find_tree_item_by_dn(obj.dn)
