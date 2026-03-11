@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, Signal, Qt, QTimer
+from PySide6.QtCore import QMimeData, QPoint, Signal, Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -2644,6 +2644,7 @@ class MainWindow(QMainWindow):
         self.main_splitter_sizes: list[int] = []
         self.show_advanced_features = True
         self.current_dn: Optional[str] = None
+        self.pending_auto_connect = False
         self.load_settings()
 
         if self.window_size:
@@ -2767,6 +2768,30 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
 
         if self.auto_connect and self.saved_host:
+            self.pending_auto_connect = True
+
+    def center_dialog_over_main_window(self, dialog: QDialog) -> None:
+        if not self.isVisible():
+            return
+
+        parent_center = self.frameGeometry().center()
+        dialog_rect = dialog.frameGeometry()
+        dialog_rect.moveCenter(parent_center)
+        top_left = dialog_rect.topLeft()
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = max(available.left(), min(top_left.x(), available.right() - dialog_rect.width() + 1))
+            y = max(available.top(), min(top_left.y(), available.bottom() - dialog_rect.height() + 1))
+            top_left = QPoint(x, y)
+
+        dialog.move(top_left)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.pending_auto_connect:
+            self.pending_auto_connect = False
             QTimer.singleShot(0, self.auto_connect_if_configured)
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
@@ -2870,9 +2895,12 @@ class MainWindow(QMainWindow):
     def run_with_loading(self, message: str, action) -> None:
         loading = QProgressDialog(message, None, 0, 0, self)
         loading.setWindowTitle("Please wait")
-        loading.setWindowModality(Qt.ApplicationModal)
+        loading.setWindowModality(Qt.WindowModal)
         loading.setCancelButton(None)
         loading.setMinimumDuration(0)
+        loading.setAutoClose(False)
+        loading.setAutoReset(False)
+        self.center_dialog_over_main_window(loading)
         loading.show()
         QApplication.processEvents()
 
