@@ -13,9 +13,9 @@ Python implementation of Microsoft's **Active Directory Users and Computers (ADU
 * [Running Manually](#running-manually-without-launcher)  
 * [Configuration](#configuration)  
 * [Roadmap](#roadmap-ideas)  
-* [Disclaimer](#disclaimer)  
-* [Donate](#domate)  
+* [Donate](#donate)
 * [Contributing](#contributing)  
+* [Disclaimer](#disclaimer)
 
 ## About
 
