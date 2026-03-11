@@ -1300,6 +1300,10 @@ class ConnectDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
 
+        # Make the connect dialog wide enough for long title bars and field contents.
+        hint = self.sizeHint()
+        self.setMinimumWidth(max(400, hint.width()))
+
     def values(self) -> tuple[str, int, str, str]:
         return (
             self.host_edit.text().strip(),
@@ -2390,6 +2394,9 @@ class MainWindow(QMainWindow):
         self.saved_host = ""
         self.saved_port = 636
         self.auto_connect = False
+        self.last_bind_user = ""
+        self.last_bind_password = ""
+        self.connection_alert_shown = False
         self.main_table_column_widths: list[int] = []
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
@@ -2525,6 +2532,65 @@ class MainWindow(QMainWindow):
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
 
+    @staticmethod
+    def is_connection_error(error: Exception) -> bool:
+        text = str(error).lower()
+        connection_markers = [
+            "socket",
+            "connection",
+            "eof occurred",
+            "session terminated",
+            "broken pipe",
+            "server down",
+            "timed out",
+            "connection reset",
+            "can't contact ldap server",
+        ]
+        return any(marker in text for marker in connection_markers)
+
+    def can_attempt_reconnect(self) -> bool:
+        if not self.saved_host:
+            return False
+        if self.auth_mode == "kerberos":
+            return True
+        return bool(self.last_bind_user and self.last_bind_password)
+
+    def reset_connection_alert(self) -> None:
+        self.connection_alert_shown = False
+
+    def show_connection_alert_once(self, message: str) -> None:
+        self.statusBar().showMessage(message)
+        if self.connection_alert_shown:
+            return
+        self.connection_alert_shown = True
+        self.show_error("Connection issue", message)
+
+    def reconnect(self) -> None:
+        if self.auth_mode == "kerberos":
+            self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
+        else:
+            self.ldap.connect_simple(
+                self.saved_host,
+                self.last_bind_user,
+                self.last_bind_password,
+                port=self.saved_port,
+            )
+        self.reset_connection_alert()
+
+    def with_connection_retry(self, action, reconnect_message: str):
+        try:
+            return action()
+        except Exception as first_error:
+            if not self.is_connection_error(first_error) or not self.can_attempt_reconnect():
+                raise
+
+        try:
+            self.reconnect()
+            return action()
+        except Exception:
+            self.show_connection_alert_once(reconnect_message)
+            return None
+
     def show_about_dialog(self) -> None:
         QMessageBox.information(
             self,
@@ -2571,12 +2637,6 @@ class MainWindow(QMainWindow):
             action()
         finally:
             loading.close()
-
-    def show_options_dialog(self) -> None:
-        dlg = OptionsDialog(self.auth_mode, self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        self.auth_mode = dlg.selected_auth_mode()
 
     def load_settings(self) -> None:
         try:
@@ -2666,6 +2726,9 @@ class MainWindow(QMainWindow):
         try:
             def connect_and_load() -> None:
                 self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
+                self.last_bind_user = ""
+                self.last_bind_password = ""
+                self.reset_connection_alert()
 
                 self.populate_roots()
 
@@ -2693,14 +2756,19 @@ class MainWindow(QMainWindow):
         try:
             if self.auth_mode == "kerberos":
                 self.ldap.connect_kerberos(host, port=port)
+                self.last_bind_user = ""
+                self.last_bind_password = ""
             else:
                 self.ldap.connect_simple(host, bind_user, password, port=port)
+                self.last_bind_user = bind_user
+                self.last_bind_password = password
         except Exception as e:
             self.show_error("Connection failed", str(e))
             return
 
         self.saved_host = host
         self.saved_port = port
+        self.reset_connection_alert()
         self.save_settings()
         self.populate_roots()
 
@@ -2709,10 +2777,11 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         self.current_dn = None
 
-        try:
-            partitions = self.ldap.get_directory_partitions()
-        except Exception as e:
-            self.show_error("Failed to read RootDSE", str(e))
+        partitions = self.with_connection_retry(
+            self.ldap.get_directory_partitions,
+            "Connection to the domain controller was lost. Please reconnect.",
+        )
+        if partitions is None:
             return
 
         default_nc = partitions.get("default_naming_context")
@@ -2802,7 +2871,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            children = self.ldap.list_children(dn)
+            children = self.with_connection_retry(
+                lambda: self.ldap.list_children(dn),
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if children is None:
+                return
         except Exception as e:
             self.show_error("Browse failed", str(e))
             return
@@ -2827,7 +2901,12 @@ class MainWindow(QMainWindow):
 
     def populate_main_pane(self, dn: str, add_history: bool = True) -> None:
         try:
-            children = self.ldap.list_children(dn)
+            children = self.with_connection_retry(
+                lambda: self.ldap.list_children(dn),
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if children is None:
+                return
         except Exception as e:
             self.show_error("List failed", str(e))
             return
