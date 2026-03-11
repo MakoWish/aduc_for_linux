@@ -63,6 +63,8 @@ CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "aduc-linux")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
 SPLASH_IMAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image.png")
+SPLASH_IMAGE_SIZE = 600
+SPLASH_FADE_DURATION_MS = 1400
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/VERSION"
 UPDATE_COMMAND = "bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/install.sh)"
 
@@ -4428,13 +4430,21 @@ class StartupSplash(QSplashScreen):
     def __init__(self, duration_ms: int = 3000) -> None:
         splash_pixmap = QPixmap(SPLASH_IMAGE_FILE)
         image_loaded = not splash_pixmap.isNull()
-        if not image_loaded:
+        if image_loaded:
+            splash_pixmap = splash_pixmap.scaled(
+                SPLASH_IMAGE_SIZE,
+                SPLASH_IMAGE_SIZE,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        else:
             splash_pixmap = QPixmap(480, 270)
             splash_pixmap.fill(QColor("black"))
         super().__init__(splash_pixmap)
 
         self._duration_ms = duration_ms
         self._start_time = 0.0
+        self._fade_started = False
 
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -4448,7 +4458,7 @@ class StartupSplash(QSplashScreen):
             )
 
         self.fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
-        self.fade_animation.setDuration(700)
+        self.fade_animation.setDuration(SPLASH_FADE_DURATION_MS)
         self.fade_animation.setStartValue(1.0)
         self.fade_animation.setEndValue(0.0)
         self.fade_animation.setEasingCurve(QEasingCurve.OutCubic)
@@ -4459,19 +4469,27 @@ class StartupSplash(QSplashScreen):
         if self._start_time == 0.0:
             self._start_time = time.monotonic()
 
+    def _start_fade(self) -> None:
+        if self._fade_started:
+            return
+        self._fade_started = True
+        self.raise_()
+        self.setWindowOpacity(1.0)
+        self.fade_animation.start()
+
     def finish_with_fade(self) -> None:
         elapsed_ms = 0
         if self._start_time:
             elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
         fade_delay_ms = max(0, self._duration_ms - self.fade_animation.duration() - elapsed_ms)
-        QTimer.singleShot(fade_delay_ms, self.fade_animation.start)
+        QTimer.singleShot(fade_delay_ms, self._start_fade)
 
 
 def launch_main_window(app: QApplication, splash: StartupSplash) -> None:
     main_window = MainWindow()
     main_window.show()
+    splash.fade_animation.finished.connect(prompt_for_update_if_available)
     splash.finish_with_fade()
-    QTimer.singleShot(0, prompt_for_update_if_available)
     app.main_window = main_window
 
 
