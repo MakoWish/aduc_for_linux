@@ -90,10 +90,6 @@ Potential next improvements:
 - Add automated tests beyond syntax validation.
 - Improve packaging options (native packages/AppImage/Flatpak).
 
-## Disclaimer
-
-This is an independent project and is not an official Microsoft product. Although all efforts are made to ensure this project works without issue, use at your own risk.
-
 ## Donate
 
 Like this project? [Buy me a coffee!](buymeacoffee.com/MakoWish) 
@@ -101,3 +97,7 @@ Like this project? [Buy me a coffee!](buymeacoffee.com/MakoWish)
 ## Contributing
 
 Want to contribute to this project? Please feel free to open an [Issue](https://github.com/MakoWish/aduc_for_linux/issues) with your suggestions, and we can collaborate on PR's.
+
+## Disclaimer
+
+This is an independent project and is not an official Microsoft product. Although all efforts are made to ensure this project works without issue, use at your own risk.
