@@ -4340,13 +4340,13 @@ class MainWindow(QMainWindow):
         else:
             self.open_properties(obj)
 
-    def find_tree_item_by_dn(self, dn: str) -> Optional[QTreeWidgetItem]:
+    def find_tree_item_by_dn(self, dn: str, loaded_only: bool = False) -> Optional[QTreeWidgetItem]:
         def walk(item: QTreeWidgetItem) -> Optional[QTreeWidgetItem]:
             data = item.data(0, Qt.UserRole) or {}
             if data.get("dn") == dn:
                 return item
 
-            if data.get("container", False):
+            if data.get("container", False) and not loaded_only:
                 self.load_tree_children(item)
 
             for i in range(item.childCount()):
@@ -4357,25 +4357,38 @@ class MainWindow(QMainWindow):
 
         for i in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(i)
-            self.load_tree_children(top)
+            if not loaded_only:
+                self.load_tree_children(top)
             found = walk(top)
             if found:
                 return found
         return None
+
+    def refresh_tree_item_children(self, item: QTreeWidgetItem) -> None:
+        data = item.data(0, Qt.UserRole) or {}
+        data["loaded"] = False
+        item.setData(0, Qt.UserRole, data)
+        while item.childCount():
+            item.takeChild(0)
+        self.load_tree_children(item)
 
     def refresh_current(self) -> None:
         if not self.current_dn:
             return
         self.populate_main_pane(self.current_dn, add_history=False)
 
-        tree_item = self.find_tree_item_by_dn(self.current_dn)
+        tree_item = None
+        current_item = self.tree.currentItem()
+        if current_item is not None:
+            data = current_item.data(0, Qt.UserRole) or {}
+            if data.get("dn") == self.current_dn:
+                tree_item = current_item
+
+        if tree_item is None:
+            tree_item = self.find_tree_item_by_dn(self.current_dn, loaded_only=True)
+
         if tree_item:
-            data = tree_item.data(0, Qt.UserRole) or {}
-            data["loaded"] = False
-            tree_item.setData(0, Qt.UserRole, data)
-            while tree_item.childCount():
-                tree_item.takeChild(0)
-            self.load_tree_children(tree_item)
+            self.refresh_tree_item_children(tree_item)
 
 
 def prompt_for_update_if_available() -> None:
