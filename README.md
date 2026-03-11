@@ -15,6 +15,7 @@ Python implementation of Microsoft's **Active Directory Users and Computers (ADU
 * [Roadmap](#roadmap-ideas)  
 * [Disclaimer](#disclaimer)  
 * [Donate](#domate)  
+* [Contributing](#contributing)  
 
 ## About
 
@@ -96,3 +97,7 @@ This is an independent project and is not an official Microsoft product. Althoug
 ## Donate
 
 Like this project? [Buy me a coffee!](buymeacoffee.com/MakoWish) 
+
+## Contributing
+
+Want to contribute to this project? Please feel free to open an [Issue](https://github.com/MakoWish/aduc_for_linux/issues) with your suggestions, and we can collaborate on PR's.
