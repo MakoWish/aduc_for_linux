@@ -3245,8 +3245,14 @@ class MainWindow(QMainWindow):
                 allowed_actions.add(action_name)
         return allowed_actions
 
-    def add_creation_actions_to_menu(self, menu: QMenu, parent_dn: str) -> dict[str, Optional[QAction]]:
-        allowed_actions = self.allowed_creation_actions_for_dn(parent_dn)
+    def add_creation_actions_to_menu(
+        self,
+        menu: QMenu,
+        parent_dn: str,
+        allowed_actions: Optional[set[str]] = None,
+    ) -> dict[str, Optional[QAction]]:
+        if allowed_actions is None:
+            allowed_actions = self.allowed_creation_actions_for_dn(parent_dn)
         actions: dict[str, Optional[QAction]] = {
             "user": None,
             "group": None,
@@ -3255,15 +3261,29 @@ class MainWindow(QMainWindow):
         }
 
         if "user" in allowed_actions:
-            actions["user"] = menu.addAction("New User...")
+            actions["user"] = menu.addAction("User")
         if "group" in allowed_actions:
-            actions["group"] = menu.addAction("New Group...")
+            actions["group"] = menu.addAction("Group")
         if "computer" in allowed_actions:
-            actions["computer"] = menu.addAction("New Computer...")
+            actions["computer"] = menu.addAction("Computer")
         if "organizational_unit" in allowed_actions:
-            actions["organizational_unit"] = menu.addAction("New Organizational Unit...")
+            actions["organizational_unit"] = menu.addAction("Organizational Unit")
 
         return actions
+
+    def add_new_submenu(self, menu: QMenu, parent_dn: str) -> tuple[Optional[QMenu], dict[str, Optional[QAction]]]:
+        allowed_actions = self.allowed_creation_actions_for_dn(parent_dn)
+        if not allowed_actions:
+            return None, {
+                "user": None,
+                "group": None,
+                "computer": None,
+                "organizational_unit": None,
+            }
+
+        new_menu = menu.addMenu("New")
+        create_actions = self.add_creation_actions_to_menu(new_menu, parent_dn, allowed_actions=allowed_actions)
+        return new_menu, create_actions
 
     def ldap_object_from_tree_item(self, item: QTreeWidgetItem) -> Optional[LdapObject]:
         if not item:
@@ -3297,7 +3317,10 @@ class MainWindow(QMainWindow):
         properties_action = menu.addAction("Properties")
         refresh_action = menu.addAction("Refresh")
         search_action = menu.addAction("Find...")
-        create_actions = self.add_creation_actions_to_menu(menu, obj.dn) if obj.is_container else {}
+        if obj.is_container:
+            _, create_actions = self.add_new_submenu(menu, obj.dn)
+        else:
+            create_actions = {}
         create_user_action = create_actions.get("user")
         create_group_action = create_actions.get("group")
         create_computer_action = create_actions.get("computer")
@@ -3390,7 +3413,7 @@ class MainWindow(QMainWindow):
         if is_single and obj.is_container:
             open_action = menu.addAction("Open")
             menu.addSeparator()
-            create_actions = self.add_creation_actions_to_menu(menu, obj.dn)
+            _, create_actions = self.add_new_submenu(menu, obj.dn)
             new_user_action = create_actions.get("user")
             new_group_action = create_actions.get("group")
             new_computer_action = create_actions.get("computer")
