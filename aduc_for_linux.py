@@ -527,6 +527,25 @@ class LdapManager:
 
         return contexts
 
+    def get_default_naming_context(self) -> Optional[str]:
+        partitions = self.get_directory_partitions()
+        default_nc = partitions.get("default_naming_context")
+        if isinstance(default_nc, str) and default_nc.strip():
+            return default_nc.strip()
+
+        naming_contexts = self.get_naming_contexts()
+        for context in naming_contexts:
+            value = str(context).strip()
+            if value and value.upper().startswith("DC="):
+                return value
+
+        for context in naming_contexts:
+            value = str(context).strip()
+            if value:
+                return value
+
+        return None
+
     def get_directory_partitions(self) -> dict[str, Any]:
         empty_partitions = {
             "default_naming_context": None,
@@ -3514,11 +3533,15 @@ class MainWindow(QMainWindow):
         if not selected_objects:
             return
 
-        dlg = MoveObjectDialog(self.ldap, "Move", self)
-        dlg.setWindowModality(Qt.WindowModal)
-        dlg.ensurePolished()
-        self.center_dialog_over_main_window(dlg)
-        if dlg.exec() != QDialog.Accepted:
+        try:
+            dlg = MoveObjectDialog(self.ldap, "Move", self)
+            dlg.setWindowModality(Qt.WindowModal)
+            dlg.ensurePolished()
+            self.center_dialog_over_main_window(dlg)
+            if dlg.exec() != QDialog.Accepted:
+                return
+        except Exception as e:
+            self.show_error("Move", f"Unable to open Move dialog: {e}")
             return
 
         target_dn = dlg.selected_target_dn()
@@ -3571,16 +3594,14 @@ class MainWindow(QMainWindow):
         if not selected_dns:
             return
 
-        lookup = {obj.dn: obj for obj in self.selected_table_objects()}
         objects: list[LdapObject] = []
         for dn in selected_dns:
-            obj = lookup.get(dn)
-            if obj is None:
-                obj = self.ldap.get_object_summary(dn)
+            obj = self.ldap.get_object_summary(dn)
             if obj is not None:
                 objects.append(obj)
 
         if not objects:
+            self.statusBar().showMessage("Unable to resolve dragged directory objects.")
             return
 
         self.move_objects_to_container(objects, target_dn)
