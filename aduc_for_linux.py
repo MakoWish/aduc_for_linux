@@ -9,12 +9,13 @@ import sys
 import urllib.error
 import urllib.request
 import webbrowser
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop
+from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
+    QSplashScreen,
 )
 
 from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, Connection, Server, Tls
@@ -60,6 +62,9 @@ TEST_BIND_PASSWORD = ""
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "aduc-linux")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+SPLASH_IMAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image.png")
+SPLASH_IMAGE_SIZE = 600
+SPLASH_FADE_DURATION_MS = 1400
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/VERSION"
 UPDATE_COMMAND = "bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/install.sh)"
 
@@ -4421,12 +4426,93 @@ def prompt_for_update_if_available() -> None:
         webbrowser.open("https://github.com/MakoWish/aduc_for_linux")
 
 
+class StartupSplash(QSplashScreen):
+    def __init__(self, duration_ms: int = 3000) -> None:
+        splash_pixmap = QPixmap(SPLASH_IMAGE_FILE)
+        self._image_loaded = not splash_pixmap.isNull()
+        if self._image_loaded:
+            splash_pixmap = splash_pixmap.scaled(
+                SPLASH_IMAGE_SIZE,
+                SPLASH_IMAGE_SIZE,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        else:
+            splash_pixmap = QPixmap(480, 270)
+            splash_pixmap.fill(QColor("black"))
+        super().__init__(splash_pixmap)
+
+        self._duration_ms = duration_ms
+        self._start_time = 0.0
+        self._fade_started = False
+        self._content_opacity = 1.0
+
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        self.fade_animation = QPropertyAnimation(self, b"contentOpacity", self)
+        self.fade_animation.setDuration(SPLASH_FADE_DURATION_MS)
+        self.fade_animation.setStartValue(1.0)
+        self.fade_animation.setEndValue(0.0)
+        self.fade_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.fade_animation.valueChanged.connect(lambda _: self.update())
+        self.fade_animation.finished.connect(self.close)
+
+    def get_content_opacity(self) -> float:
+        return self._content_opacity
+
+    def set_content_opacity(self, value: float) -> None:
+        self._content_opacity = float(value)
+
+    contentOpacity = Property(float, get_content_opacity, set_content_opacity)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setOpacity(self._content_opacity)
+        painter.drawPixmap(0, 0, self.pixmap())
+
+        if not self._image_loaded:
+            painter.setPen(QColor("white"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Starting ADUC for Linux...")
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._start_time == 0.0:
+            self._start_time = time.monotonic()
+
+    def _start_fade(self) -> None:
+        if self._fade_started:
+            return
+        self._fade_started = True
+        self.raise_()
+        self._content_opacity = 1.0
+        self.fade_animation.start()
+
+    def finish_with_fade(self) -> None:
+        elapsed_ms = 0
+        if self._start_time:
+            elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
+        fade_delay_ms = max(0, self._duration_ms - self.fade_animation.duration() - elapsed_ms)
+        QTimer.singleShot(fade_delay_ms, self._start_fade)
+
+
+def launch_main_window(app: QApplication, splash: StartupSplash) -> None:
+    main_window = MainWindow()
+    main_window.show()
+    splash.fade_animation.finished.connect(prompt_for_update_if_available)
+    splash.finish_with_fade()
+    app.main_window = main_window
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(build_application_icon())
-    prompt_for_update_if_available()
-    win = MainWindow()
-    win.show()
+
+    splash = StartupSplash()
+    splash.show()
+
+    QTimer.singleShot(0, lambda: launch_main_window(app, splash))
     return app.exec()
 
 
