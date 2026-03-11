@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop
+from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QGraphicsOpacityEffect,
     QPushButton,
     QSplitter,
     QStyle,
@@ -4426,8 +4427,8 @@ class StartupSplash(QWidget):
     def __init__(self, parent: QMainWindow, duration_ms: int = 3000) -> None:
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet("background-color: black;")
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -4443,10 +4444,23 @@ class StartupSplash(QWidget):
             image_label.setPixmap(pixmap)
 
         layout.addWidget(image_label)
+
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self.opacity_effect)
+
+        self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity", self)
+        self.fade_animation.setDuration(700)
+        self.fade_animation.setStartValue(1.0)
+        self.fade_animation.setEndValue(0.0)
+        self.fade_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.fade_animation.finished.connect(self.close)
+
         self.setGeometry(parent.rect())
         self.show()
         self.raise_()
-        QTimer.singleShot(duration_ms, self.close)
+        fade_delay_ms = max(0, duration_ms - self.fade_animation.duration())
+        QTimer.singleShot(fade_delay_ms, self.fade_animation.start)
 
 
 def main() -> int:
@@ -4456,7 +4470,6 @@ def main() -> int:
     win = MainWindow()
     win.show()
     splash = StartupSplash(win)
-    splash.show()
     return app.exec()
 
 
