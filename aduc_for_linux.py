@@ -4467,18 +4467,22 @@ class StartupSplash(QSplashScreen):
         QTimer.singleShot(fade_delay_ms, self.fade_animation.start)
 
 
+def launch_main_window(app: QApplication, splash: StartupSplash) -> None:
+    main_window = MainWindow()
+    main_window.show()
+    splash.finish_with_fade()
+    QTimer.singleShot(0, prompt_for_update_if_available)
+    app.main_window = main_window
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(build_application_icon())
+
     splash = StartupSplash()
     splash.show()
-    app.processEvents()
 
-    win = MainWindow()
-    win.show()
-    splash.finish_with_fade()
-
-    QTimer.singleShot(0, prompt_for_update_if_available)
+    QTimer.singleShot(0, lambda: launch_main_window(app, splash))
     return app.exec()
 
 
