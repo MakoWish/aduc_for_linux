@@ -60,6 +60,7 @@ TEST_BIND_PASSWORD = ""
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "aduc-linux")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+SPLASH_IMAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image.png")
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/VERSION"
 UPDATE_COMMAND = "bash <(wget -qO- https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/install.sh)"
 
@@ -4421,12 +4422,41 @@ def prompt_for_update_if_available() -> None:
         webbrowser.open("https://github.com/MakoWish/aduc_for_linux")
 
 
+class StartupSplash(QWidget):
+    def __init__(self, parent: QMainWindow, duration_ms: int = 3000) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.SubWindow)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("background-color: black;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        image_label = QLabel(self)
+        image_label.setAlignment(Qt.AlignCenter)
+
+        pixmap = QPixmap(SPLASH_IMAGE_FILE)
+        if pixmap.isNull():
+            image_label.setText("Starting ADUC for Linux...")
+            image_label.setStyleSheet("color: white; font-size: 18px;")
+        else:
+            image_label.setPixmap(pixmap)
+
+        layout.addWidget(image_label)
+        self.setGeometry(parent.rect())
+        self.show()
+        self.raise_()
+        QTimer.singleShot(duration_ms, self.close)
+
+
 def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(build_application_icon())
     prompt_for_update_if_available()
     win = MainWindow()
     win.show()
+    splash = StartupSplash(win)
+    splash.show()
     return app.exec()
 
 
