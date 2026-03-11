@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -4429,8 +4429,8 @@ def prompt_for_update_if_available() -> None:
 class StartupSplash(QSplashScreen):
     def __init__(self, duration_ms: int = 3000) -> None:
         splash_pixmap = QPixmap(SPLASH_IMAGE_FILE)
-        image_loaded = not splash_pixmap.isNull()
-        if image_loaded:
+        self._image_loaded = not splash_pixmap.isNull()
+        if self._image_loaded:
             splash_pixmap = splash_pixmap.scaled(
                 SPLASH_IMAGE_SIZE,
                 SPLASH_IMAGE_SIZE,
@@ -4445,24 +4445,36 @@ class StartupSplash(QSplashScreen):
         self._duration_ms = duration_ms
         self._start_time = 0.0
         self._fade_started = False
+        self._content_opacity = 1.0
 
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setWindowOpacity(1.0)
 
-        if not image_loaded:
-            self.showMessage(
-                "Starting ADUC for Linux...",
-                Qt.AlignCenter | Qt.AlignBottom,
-                QColor("white"),
-            )
-
-        self.fade_animation = QPropertyAnimation(self, b"windowOpacity", self)
+        self.fade_animation = QPropertyAnimation(self, b"contentOpacity", self)
         self.fade_animation.setDuration(SPLASH_FADE_DURATION_MS)
         self.fade_animation.setStartValue(1.0)
         self.fade_animation.setEndValue(0.0)
         self.fade_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.fade_animation.valueChanged.connect(lambda _: self.update())
         self.fade_animation.finished.connect(self.close)
+
+    def get_content_opacity(self) -> float:
+        return self._content_opacity
+
+    def set_content_opacity(self, value: float) -> None:
+        self._content_opacity = float(value)
+
+    contentOpacity = Property(float, get_content_opacity, set_content_opacity)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.setOpacity(self._content_opacity)
+        painter.drawPixmap(0, 0, self.pixmap())
+
+        if not self._image_loaded:
+            painter.setPen(QColor("white"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Starting ADUC for Linux...")
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -4474,7 +4486,7 @@ class StartupSplash(QSplashScreen):
             return
         self._fade_started = True
         self.raise_()
-        self.setWindowOpacity(1.0)
+        self._content_opacity = 1.0
         self.fade_animation.start()
 
     def finish_with_fade(self) -> None:
