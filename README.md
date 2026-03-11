@@ -6,9 +6,8 @@ Python implementation of Microsoft's **Active Directory Users and Computers (ADU
 
 ## Index
 
-[About](#about)
-[Features](#features--current-)
-
+[About](#about)  
+[Features](#features-current)
 
 ## About
 
