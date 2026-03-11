@@ -2562,17 +2562,22 @@ class MoveObjectDialog(QDialog):
         self.setWindowTitle(title)
         self.resize(520, 520)
 
-        self.tree = DirectoryTreeWidget()
+        self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Move object to")
+        self.tree.setExpandsOnDoubleClick(True)
         self.tree.itemExpanded.connect(self.on_item_expanded)
+        self.tree.currentItemChanged.connect(self.on_current_item_changed)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.ok_button = self.buttons.button(QDialogButtonBox.Ok)
+        if self.ok_button is not None:
+            self.ok_button.setEnabled(False)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.tree)
-        layout.addWidget(buttons)
+        layout.addWidget(self.buttons)
 
         self.populate_roots()
 
@@ -2581,17 +2586,28 @@ class MoveObjectDialog(QDialog):
         contexts = self.ldap.get_naming_contexts()
         for dn in contexts:
             item = QTreeWidgetItem([dn])
-            item.setData(0, Qt.UserRole, {"dn": dn, "loaded": False, "container": True})
+            item.setData(
+                0,
+                Qt.UserRole,
+                {
+                    "dn": dn,
+                    "loaded": False,
+                    "container": False,
+                    "object_classes": ["domain"],
+                },
+            )
             item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             item.setIcon(0, icon_for_object_classes(self.style(), ["domain"], has_child_ou=True))
             self.tree.addTopLevelItem(item)
+            self.load_tree_children(item)
+            item.setExpanded(True)
 
-    def on_item_expanded(self, item: QTreeWidgetItem) -> None:
+    def load_tree_children(self, item: QTreeWidgetItem) -> None:
         data = item.data(0, Qt.UserRole) or {}
         if data.get("loaded", False):
             return
 
-        dn = data.get("dn")
+        dn = str(data.get("dn", "")).strip()
         if not dn:
             return
 
@@ -2607,7 +2623,16 @@ class MoveObjectDialog(QDialog):
             if not child.is_container:
                 continue
             child_item = QTreeWidgetItem([child.name])
-            child_item.setData(0, Qt.UserRole, {"dn": child.dn, "loaded": False, "container": True})
+            child_item.setData(
+                0,
+                Qt.UserRole,
+                {
+                    "dn": child.dn,
+                    "loaded": False,
+                    "container": True,
+                    "object_classes": child.object_classes,
+                },
+            )
             child_item.setIcon(0, icon_for_directory_object(self.style(), child))
             child_item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             item.addChild(child_item)
@@ -2615,11 +2640,29 @@ class MoveObjectDialog(QDialog):
         data["loaded"] = True
         item.setData(0, Qt.UserRole, data)
 
+    def on_item_expanded(self, item: QTreeWidgetItem) -> None:
+        self.load_tree_children(item)
+
+    def on_current_item_changed(self, current: Optional[QTreeWidgetItem], _previous: Optional[QTreeWidgetItem]) -> None:
+        can_accept = False
+        if current is not None:
+            data = current.data(0, Qt.UserRole) or {}
+            object_classes = {str(cls).lower() for cls in data.get("object_classes", [])}
+            can_accept = bool({"organizationalunit", "container", "builtindomain"} & object_classes)
+
+        if self.ok_button is not None:
+            self.ok_button.setEnabled(can_accept)
+
     def selected_target_dn(self) -> Optional[str]:
         item = self.tree.currentItem()
         if not item:
             return None
+
         data = item.data(0, Qt.UserRole) or {}
+        object_classes = {str(cls).lower() for cls in data.get("object_classes", [])}
+        if not ({"organizationalunit", "container", "builtindomain"} & object_classes):
+            return None
+
         dn = str(data.get("dn", "")).strip()
         return dn or None
 
