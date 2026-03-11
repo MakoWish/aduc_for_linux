@@ -2153,7 +2153,7 @@ class SelectDirectoryObjectsDialog(QDialog):
         layout.addWidget(self.results)
         layout.addWidget(buttons)
 
-    def run_search(self) -> None:
+    def run_search(self, *_args) -> None:
         term = self.search_edit.text().strip()
         if not term:
             return
@@ -2178,6 +2178,9 @@ class SelectDirectoryObjectsDialog(QDialog):
             self.results.setItem(row, 0, name_item)
             self.results.setItem(row, 1, type_item)
             self.results.setItem(row, 2, dn_item)
+
+        if not results:
+            QMessageBox.information(self, "Search", "No objects found.")
 
     def selected_objects(self) -> list[LdapObject]:
         seen_rows = sorted({idx.row() for idx in self.results.selectionModel().selectedRows()})
