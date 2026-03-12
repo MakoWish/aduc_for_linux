@@ -3009,6 +3009,11 @@ class GroupPropertiesDialog(QDialog):
         self.attrs = attrs
         self.search_base = search_base
         self.original_member_dns: list[str] = []
+        self.original_sam_name = attrs.get("sAMAccountName", [""])[0]
+        self.original_description = attrs.get("description", [""])[0]
+        self.original_email = attrs.get("mail", [""])[0]
+        self.original_managed_by = attrs.get("managedBy", [""])[0]
+        self.apply_button: Optional[QPushButton] = None
 
         tabs = QTabWidget()
 
@@ -3078,9 +3083,13 @@ class GroupPropertiesDialog(QDialog):
         security_layout.addWidget(QLabel("Security editor not implemented yet."))
         tabs.addTab(security_tab, "Security")
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
         buttons.rejected.connect(self.reject)
+        apply_button = buttons.button(QDialogButtonBox.Apply)
+        if apply_button:
+            self.apply_button = apply_button
+            apply_button.clicked.connect(self.apply_changes)
 
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
@@ -3092,6 +3101,14 @@ class GroupPropertiesDialog(QDialog):
 
         self.load_members()
         self.load_member_of()
+
+        self.sam_name_edit.textChanged.connect(self.refresh_apply_button_state)
+        self.description_edit.textChanged.connect(self.refresh_apply_button_state)
+        self.email_edit.textChanged.connect(self.refresh_apply_button_state)
+        self.managed_by_edit.textChanged.connect(self.refresh_apply_button_state)
+        self.members_list.model().rowsInserted.connect(lambda *_: self.refresh_apply_button_state())
+        self.members_list.model().rowsRemoved.connect(lambda *_: self.refresh_apply_button_state())
+        self.refresh_apply_button_state()
 
     def icon_for_object(self, obj: LdapObject) -> QIcon:
         return icon_for_directory_object(self.style(), obj)
@@ -3168,18 +3185,60 @@ class GroupPropertiesDialog(QDialog):
             row = self.members_list.row(item)
             self.members_list.takeItem(row)
 
-    def apply_changes(self) -> None:
+    def has_pending_changes(self) -> bool:
+        if self.sam_name_edit.text().strip() != self.original_sam_name:
+            return True
+        if self.description_edit.text().strip() != self.original_description:
+            return True
+        if self.email_edit.text().strip() != self.original_email:
+            return True
+        if self.managed_by_edit.text().strip() != self.original_managed_by:
+            return True
+        if self.current_member_dns() != self.original_member_dns:
+            return True
+        return False
+
+    def refresh_apply_button_state(self) -> None:
+        if self.apply_button:
+            self.apply_button.setEnabled(self.has_pending_changes())
+
+    def apply_changes(self) -> bool:
         member_dns = self.current_member_dns()
+        sam_name = self.sam_name_edit.text().strip()
+        description = self.description_edit.text().strip()
+        email = self.email_edit.text().strip()
+        managed_by = self.managed_by_edit.text().strip()
+
         try:
-            self.ldap.replace_group_members(self.group_obj.dn, member_dns)
+            if sam_name != self.original_sam_name:
+                self.ldap.replace_object_attribute_values(self.group_obj.dn, "sAMAccountName", [sam_name] if sam_name else [])
+                self.original_sam_name = sam_name
+
+            if description != self.original_description:
+                self.ldap.replace_object_attribute_values(self.group_obj.dn, "description", [description] if description else [])
+                self.original_description = description
+
+            if email != self.original_email:
+                self.ldap.replace_object_attribute_values(self.group_obj.dn, "mail", [email] if email else [])
+                self.original_email = email
+
+            if managed_by != self.original_managed_by:
+                self.ldap.replace_object_attribute_values(self.group_obj.dn, "managedBy", [managed_by] if managed_by else [])
+                self.original_managed_by = managed_by
+
+            if member_dns != self.original_member_dns:
+                self.ldap.replace_group_members(self.group_obj.dn, member_dns)
+                self.original_member_dns = member_dns
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
-            return
-        self.original_member_dns = member_dns
+            return False
+
+        self.refresh_apply_button_state()
+        return True
 
     def on_ok(self) -> None:
-        self.apply_changes()
-        self.accept()
+        if self.apply_changes():
+            self.accept()
 
 
 class DirectoryTableWidget(QTableWidget):
