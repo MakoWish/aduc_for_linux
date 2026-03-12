@@ -79,7 +79,7 @@ The installer will:
 4. Create a `.desktop` launcher entry.
 5. Install a local `VERSION` file used by the app startup update check.
 
-## Running Manually (without launcher)
+#### Running Manually (without launcher)
 
 ```bash
 python3 aduc_for_linux.py
