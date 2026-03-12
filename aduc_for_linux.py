@@ -1637,6 +1637,15 @@ class ComputerPropertiesDialog(QDialog):
         self.original_location = self._single_attr(attrs, "location")
         self.original_managed_by = self._single_attr(attrs, "managedBy")
 
+        uac_raw = self._single_attr(attrs, "userAccountControl")
+        try:
+            self.current_uac_value = int(uac_raw) if uac_raw else 0
+        except ValueError:
+            self.current_uac_value = 0
+        self.original_delegation_mode = "none"
+        self.original_protocol_any_auth = False
+        self.original_delegation_services = sorted(attrs.get("msDS-AllowedToDelegateTo", []), key=str.lower)
+
         self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.selected_attribute: Optional[str] = None
         self.attribute_name_label: Optional[QLabel] = None
@@ -1648,7 +1657,7 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_general_tab(obj, attrs), "General")
         tabs.addTab(self.build_operating_system_tab(attrs), "Operating System")
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
-        tabs.addTab(self.build_delegation_tab(), "Delegation")
+        tabs.addTab(self.build_delegation_tab(attrs), "Delegation")
         tabs.addTab(self.build_laps_tab(attrs), "LAPS")
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
@@ -1770,7 +1779,38 @@ class ComputerPropertiesDialog(QDialog):
         self.refresh_member_of_remove_button_state()
         return tab
 
-    def build_delegation_tab(self) -> QWidget:
+    def _parse_delegation_service(self, service_name: str) -> tuple[str, str, str, str]:
+        value = service_name.strip()
+        if not value:
+            return "", "", "", ""
+
+        service_type = value
+        target = ""
+        port = ""
+        if "/" in value:
+            service_type, remainder = value.split("/", 1)
+            target = remainder
+        else:
+            remainder = value
+
+        if ":" in remainder:
+            target_name, maybe_port = remainder.rsplit(":", 1)
+            if maybe_port.isdigit():
+                target = target_name
+                port = maybe_port
+
+        return service_type, target, port, value
+
+    def _delegation_services_from_table(self) -> list[str]:
+        services: list[str] = []
+        for row in range(self.delegation_services_table.rowCount()):
+            full_item = self.delegation_services_table.item(row, 3)
+            full_value = full_item.text().strip() if full_item else ""
+            if full_value:
+                services.append(full_value)
+        return sorted(set(services), key=str.lower)
+
+    def build_delegation_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.addWidget(
@@ -1782,7 +1822,6 @@ class ComputerPropertiesDialog(QDialog):
         self.delegate_none_radio = QRadioButton("Do not trust this computer for delegation")
         self.delegate_any_radio = QRadioButton("Trust this computer for delegation to any service (Kerberos only)")
         self.delegate_specified_radio = QRadioButton("Trust this computer for delegation to specified services only")
-        self.delegate_none_radio.setChecked(True)
 
         self.delegate_none_radio.toggled.connect(self.refresh_delegation_controls)
         self.delegate_any_radio.toggled.connect(self.refresh_delegation_controls)
@@ -1792,20 +1831,16 @@ class ComputerPropertiesDialog(QDialog):
         layout.addWidget(self.delegate_any_radio)
         layout.addWidget(self.delegate_specified_radio)
 
-        protocol_row_1 = QHBoxLayout()
-        protocol_row_1.addSpacing(24)
+        protocol_widget = QWidget()
+        protocol_layout = QVBoxLayout(protocol_widget)
+        protocol_layout.setContentsMargins(24, 0, 0, 0)
         self.delegate_kerberos_only_radio = QRadioButton("Use Kerberos only")
-        protocol_row_1.addWidget(self.delegate_kerberos_only_radio)
-        protocol_row_1.addStretch()
-        layout.addLayout(protocol_row_1)
-
-        protocol_row_2 = QHBoxLayout()
-        protocol_row_2.addSpacing(24)
         self.delegate_any_auth_radio = QRadioButton("Use any authentication protocol")
-        protocol_row_2.addWidget(self.delegate_any_auth_radio)
-        protocol_row_2.addStretch()
-        layout.addLayout(protocol_row_2)
-        self.delegate_kerberos_only_radio.setChecked(True)
+        self.delegate_kerberos_only_radio.toggled.connect(self.refresh_apply_button_state)
+        self.delegate_any_auth_radio.toggled.connect(self.refresh_apply_button_state)
+        protocol_layout.addWidget(self.delegate_kerberos_only_radio)
+        protocol_layout.addWidget(self.delegate_any_auth_radio)
+        layout.addWidget(protocol_widget)
 
         layout.addWidget(QLabel("Services to which this account can present delegated credentials:"))
 
@@ -1826,11 +1861,41 @@ class ComputerPropertiesDialog(QDialog):
         self.delegation_expanded_checkbox = QCheckBox("Expanded")
         self.delegation_add_btn = QPushButton("Add")
         self.delegation_remove_btn = QPushButton("Remove")
+        self.delegation_add_btn.clicked.connect(self.add_delegation_service)
+        self.delegation_remove_btn.clicked.connect(self.remove_selected_delegation_services)
         service_button_row.addWidget(self.delegation_expanded_checkbox)
         service_button_row.addStretch()
         service_button_row.addWidget(self.delegation_add_btn)
         service_button_row.addWidget(self.delegation_remove_btn)
         layout.addLayout(service_button_row)
+
+        services = sorted(attrs.get("msDS-AllowedToDelegateTo", []), key=str.lower)
+        self.delegation_services_table.setRowCount(len(services))
+        for row, service_name in enumerate(services):
+            service_type, target, port, full_value = self._parse_delegation_service(service_name)
+            self.delegation_services_table.setItem(row, 0, QTableWidgetItem(service_type))
+            self.delegation_services_table.setItem(row, 1, QTableWidgetItem(target))
+            self.delegation_services_table.setItem(row, 2, QTableWidgetItem(port))
+            self.delegation_services_table.setItem(row, 3, QTableWidgetItem(full_value))
+
+        trusted_for_delegation = bool(self.current_uac_value & 0x80000)
+        trusted_to_auth = bool(self.current_uac_value & 0x1000000)
+
+        if trusted_for_delegation:
+            self.original_delegation_mode = "any"
+            self.delegate_any_radio.setChecked(True)
+        elif services:
+            self.original_delegation_mode = "specified"
+            self.delegate_specified_radio.setChecked(True)
+        else:
+            self.original_delegation_mode = "none"
+            self.delegate_none_radio.setChecked(True)
+
+        self.original_protocol_any_auth = trusted_to_auth
+        if trusted_to_auth:
+            self.delegate_any_auth_radio.setChecked(True)
+        else:
+            self.delegate_kerberos_only_radio.setChecked(True)
 
         layout.addStretch()
         self.refresh_delegation_controls()
@@ -1993,6 +2058,13 @@ class ComputerPropertiesDialog(QDialog):
                 break
         self.member_of_remove_btn.setEnabled(can_remove)
 
+    def _current_delegation_mode(self) -> str:
+        if self.delegate_any_radio.isChecked():
+            return "any"
+        if self.delegate_specified_radio.isChecked():
+            return "specified"
+        return "none"
+
     def refresh_delegation_controls(self) -> None:
         specified_only = self.delegate_specified_radio.isChecked()
         self.delegate_kerberos_only_radio.setEnabled(specified_only)
@@ -2002,6 +2074,36 @@ class ComputerPropertiesDialog(QDialog):
         has_selection = bool(self.delegation_services_table.selectionModel().selectedRows())
         has_rows = self.delegation_services_table.rowCount() > 0
         self.delegation_remove_btn.setEnabled(specified_only and has_rows and has_selection)
+        self.refresh_apply_button_state()
+
+    def add_delegation_service(self) -> None:
+        value, ok = QInputDialog.getText(
+            self,
+            "Add Delegated Service",
+            "Service principal name (for example: cifs/server.example.com):",
+        )
+        value = value.strip()
+        if not ok or not value:
+            return
+
+        existing = set(self._delegation_services_from_table())
+        if value in existing:
+            return
+
+        row = self.delegation_services_table.rowCount()
+        self.delegation_services_table.insertRow(row)
+        service_type, target, port, full_value = self._parse_delegation_service(value)
+        self.delegation_services_table.setItem(row, 0, QTableWidgetItem(service_type))
+        self.delegation_services_table.setItem(row, 1, QTableWidgetItem(target))
+        self.delegation_services_table.setItem(row, 2, QTableWidgetItem(port))
+        self.delegation_services_table.setItem(row, 3, QTableWidgetItem(full_value))
+        self.refresh_delegation_controls()
+
+    def remove_selected_delegation_services(self) -> None:
+        rows = sorted({idx.row() for idx in self.delegation_services_table.selectionModel().selectedRows()}, reverse=True)
+        for row in rows:
+            self.delegation_services_table.removeRow(row)
+        self.refresh_delegation_controls()
 
     def add_group_memberships(self) -> None:
         group_search_base = self.ldap.get_default_naming_context() or self.search_base
@@ -2073,6 +2175,15 @@ class ComputerPropertiesDialog(QDialog):
         if current_groups != sorted(self.original_group_dns, key=str.lower):
             return True
 
+        current_delegation_mode = self._current_delegation_mode()
+        if current_delegation_mode != self.original_delegation_mode:
+            return True
+        if current_delegation_mode == "specified":
+            if self.delegate_any_auth_radio.isChecked() != self.original_protocol_any_auth:
+                return True
+            if self._delegation_services_from_table() != self.original_delegation_services:
+                return True
+
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -2109,10 +2220,32 @@ class ComputerPropertiesDialog(QDialog):
             self.ldap.replace_object_attribute_values(self.computer_obj.dn, "managedBy", [managed_by_value] if managed_by_value else [])
             self.original_managed_by = managed_by_value
 
+    def apply_delegation_changes(self) -> None:
+        mode = self._current_delegation_mode()
+        services = self._delegation_services_from_table() if mode == "specified" else []
+
+        new_uac = self.current_uac_value & ~(0x80000 | 0x1000000)
+        if mode == "any":
+            new_uac |= 0x80000
+        elif mode == "specified" and self.delegate_any_auth_radio.isChecked():
+            new_uac |= 0x1000000
+
+        if new_uac != self.current_uac_value:
+            self.ldap.set_user_account_control(self.computer_obj.dn, new_uac)
+            self.current_uac_value = new_uac
+
+        if services != self.original_delegation_services:
+            self.ldap.replace_object_attribute_values(self.computer_obj.dn, "msDS-AllowedToDelegateTo", services)
+            self.original_delegation_services = list(services)
+
+        self.original_delegation_mode = mode
+        self.original_protocol_any_auth = self.delegate_any_auth_radio.isChecked()
+
     def apply_changes(self) -> bool:
         try:
             self.apply_member_of_changes()
             self.apply_attribute_changes()
+            self.apply_delegation_changes()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
