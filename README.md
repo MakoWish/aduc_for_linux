@@ -21,7 +21,9 @@ Python implementation of Microsoft's **Active Directory Users and Computers (ADU
 
 Migrating away from Windows while still managing Microsoft environments can be painful. This project aims to provide a lightweight ADUC-style GUI that works natively on Linux and covers practical day-to-day LDAP/AD object browsing and administration needs.
 
-It is intentionally small and focused: one Python app, one installer script, and minimal runtime dependencies.
+It is intentionally small and focused: one Python app, one installer script, and minimal runtime dependencies. Additional features will continue to be added. If there is something you would like to see added, please open an Issue and request it!
+
+**_NOTE_**: Also works against Samba LDAP domain controllers.
 
 ## Features (current)
 
