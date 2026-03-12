@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import QDate, QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QDialog,
     QDialogButtonBox,
+    QDateEdit,
     QFileDialog,
     QAbstractItemView,
     QFormLayout,
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -1526,6 +1528,411 @@ class PropertiesDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
+
+
+class ComputerPropertiesDialog(QDialog):
+    def __init__(
+        self,
+        ldap: LdapManager,
+        obj: LdapObject,
+        attrs: dict[str, list[str]],
+        search_base: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(obj.name)
+        self.resize(920, 650)
+        self.ldap = ldap
+        self.computer_obj = obj
+        self.search_base = search_base
+        self.original_group_dns: list[str] = sorted(attrs.get("memberOf", []), key=str.lower)
+        self.original_description = self._single_attr(attrs, "description")
+        self.original_location = self._single_attr(attrs, "location")
+        self.original_managed_by = self._single_attr(attrs, "managedBy")
+
+        self.apply_button: Optional[QPushButton] = None
+
+        tabs = QTabWidget()
+        tabs.addTab(self.build_general_tab(obj, attrs), "General")
+        tabs.addTab(self.build_operating_system_tab(attrs), "Operating System")
+        tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
+        tabs.addTab(self.build_delegation_tab(), "Delegation")
+        tabs.addTab(self.build_laps_tab(attrs), "LAPS")
+        tabs.addTab(self.build_location_tab(attrs), "Location")
+        tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
+        buttons.accepted.connect(self.on_ok)
+        buttons.rejected.connect(self.reject)
+        apply_button = buttons.button(QDialogButtonBox.Apply)
+        if apply_button:
+            self.apply_button = apply_button
+            apply_button.clicked.connect(self.apply_changes)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(tabs)
+        layout.addWidget(buttons)
+        self.refresh_apply_button_state()
+
+    def _single_attr(self, attrs: dict[str, list[str]], attr: str) -> str:
+        values = attrs.get(attr, [])
+        return values[0] if values else ""
+
+    def _readonly_line(self, value: str) -> QLineEdit:
+        edit = QLineEdit(value)
+        edit.setReadOnly(True)
+        return edit
+
+    def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        header_row = QHBoxLayout()
+        icon_label = QLabel()
+        icon_label.setPixmap(icon_for_directory_object(self.style(), obj).pixmap(32, 32))
+        header_row.addWidget(icon_label, 0, Qt.AlignTop)
+
+        name_label = QLabel(obj.name)
+        font = name_label.font()
+        font.setBold(True)
+        font.setPointSize(max(font.pointSize(), 11))
+        name_label.setFont(font)
+        header_row.addWidget(name_label)
+        header_row.addStretch()
+        layout.addLayout(header_row)
+
+        form = QFormLayout()
+        self.dns_name_edit = self._readonly_line(self._single_attr(attrs, "dNSHostName") or obj.name)
+        self.dc_type_edit = self._readonly_line(self._single_attr(attrs, "primaryGroupID") or "Computer")
+        self.site_edit = self._readonly_line(self._single_attr(attrs, "msDS-SiteName"))
+        self.description_edit = QLineEdit(self.original_description)
+        self.description_edit.textChanged.connect(self.refresh_apply_button_state)
+
+        form.addRow("DNS Name:", self.dns_name_edit)
+        form.addRow("DC Type:", self.dc_type_edit)
+        form.addRow("Site:", self.site_edit)
+        form.addRow("Description:", self.description_edit)
+        form.addRow("DN:", self._readonly_line(obj.dn))
+
+        layout.addLayout(form)
+        layout.addStretch()
+        return tab
+
+    def build_operating_system_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.addRow("Name:", self._readonly_line(self._single_attr(attrs, "operatingSystem")))
+        form.addRow("Version:", self._readonly_line(self._single_attr(attrs, "operatingSystemVersion")))
+        form.addRow("Service pack:", self._readonly_line(self._single_attr(attrs, "operatingSystemServicePack")))
+        return tab
+
+    def build_member_of_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.member_of_table = QTableWidget()
+        self.member_of_table.setColumnCount(2)
+        self.member_of_table.setHorizontalHeaderLabels(["Name", "Distinguished Name"])
+        self.member_of_table.verticalHeader().setVisible(False)
+        self.member_of_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.member_of_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.member_of_table.setSelectionMode(QTableWidget.ExtendedSelection)
+
+        groups = attrs.get("memberOf", [])
+        self.member_of_table.setRowCount(len(groups))
+        for row, dn in enumerate(sorted(groups, key=str.lower)):
+            short_name = dn.split(",", 1)[0].split("=", 1)[-1] if "=" in dn else dn
+            self.member_of_table.setItem(row, 0, QTableWidgetItem(short_name))
+            self.member_of_table.setItem(row, 1, QTableWidgetItem(dn))
+
+        button_row = QHBoxLayout()
+        self.member_of_add_btn = QPushButton("Add...")
+        self.member_of_remove_btn = QPushButton("Remove")
+        button_row.addWidget(self.member_of_add_btn)
+        button_row.addWidget(self.member_of_remove_btn)
+        button_row.addStretch()
+
+        self.member_of_add_btn.clicked.connect(self.add_group_memberships)
+        self.member_of_remove_btn.clicked.connect(self.remove_selected_group_memberships)
+
+        self.member_of_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.member_of_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+
+        layout.addWidget(self.member_of_table)
+        layout.addLayout(button_row)
+        return tab
+
+    def build_delegation_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(
+            QLabel(
+                "Delegation is a security-sensitive operation, which allows services to act on behalf of another user."
+            )
+        )
+
+        self.delegate_none_radio = QRadioButton("Do not trust this computer for delegation")
+        self.delegate_any_radio = QRadioButton("Trust this computer for delegation to any service (Kerberos only)")
+        self.delegate_specified_radio = QRadioButton("Trust this computer for delegation to specified services only")
+        self.delegate_none_radio.setChecked(True)
+
+        layout.addWidget(self.delegate_none_radio)
+        layout.addWidget(self.delegate_any_radio)
+        layout.addWidget(self.delegate_specified_radio)
+
+        protocol_row = QHBoxLayout()
+        protocol_row.addSpacing(24)
+        self.delegate_kerberos_only_radio = QRadioButton("Use Kerberos only")
+        self.delegate_any_auth_radio = QRadioButton("Use any authentication protocol")
+        self.delegate_kerberos_only_radio.setChecked(True)
+        protocol_row.addWidget(self.delegate_kerberos_only_radio)
+        protocol_row.addWidget(self.delegate_any_auth_radio)
+        protocol_row.addStretch()
+        layout.addLayout(protocol_row)
+
+        layout.addWidget(QLabel("Services to which this account can present delegated credentials:"))
+
+        self.delegation_services_table = QTableWidget()
+        self.delegation_services_table.setColumnCount(4)
+        self.delegation_services_table.setHorizontalHeaderLabels(
+            ["Service Type", "User or Computer", "Port", "Service Name"]
+        )
+        self.delegation_services_table.verticalHeader().setVisible(False)
+        self.delegation_services_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.delegation_services_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.delegation_services_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.delegation_services_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.delegation_services_table)
+
+        service_button_row = QHBoxLayout()
+        self.delegation_expanded_checkbox = QCheckBox("Expanded")
+        self.delegation_add_btn = QPushButton("Add")
+        self.delegation_remove_btn = QPushButton("Remove")
+        service_button_row.addWidget(self.delegation_expanded_checkbox)
+        service_button_row.addStretch()
+        service_button_row.addWidget(self.delegation_add_btn)
+        service_button_row.addWidget(self.delegation_remove_btn)
+        layout.addLayout(service_button_row)
+
+        layout.addStretch()
+        return tab
+
+    def build_laps_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        title = QLabel("Local Administrator Password Solution")
+        title_font = title.font()
+        title_font.setBold(True)
+        title.setFont(title_font)
+        layout.addWidget(title)
+
+        form = QFormLayout()
+        self.laps_expiry_edit = self._readonly_line(self._single_attr(attrs, "msLAPS-PasswordExpirationTime"))
+        form.addRow("Current LAPS password expiration:", self.laps_expiry_edit)
+
+        expiry_row = QHBoxLayout()
+        self.laps_new_expiry_picker = QDateEdit(QDate.currentDate())
+        self.laps_new_expiry_picker.setCalendarPopup(True)
+        self.laps_expire_now_btn = QPushButton("Expire Now")
+        expiry_row.addWidget(self.laps_new_expiry_picker)
+        expiry_row.addWidget(self.laps_expire_now_btn)
+
+        expiry_container = QWidget()
+        expiry_container.setLayout(expiry_row)
+        form.addRow("Set new LAPS password expiration:", expiry_container)
+
+        form.addRow("LAPS local admin account name:", self._readonly_line(self._single_attr(attrs, "msLAPS-LocalAdminAccountName")))
+
+        self.laps_password_edit = self._readonly_line(self._single_attr(attrs, "msLAPS-Password"))
+        form.addRow("LAPS local admin account password:", self.laps_password_edit)
+
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        self.laps_copy_password_btn = QPushButton("Copy Password")
+        self.laps_show_password_btn = QPushButton("Show Password")
+        has_password = bool(self.laps_password_edit.text().strip())
+        self.laps_copy_password_btn.setEnabled(has_password)
+        self.laps_show_password_btn.setEnabled(has_password)
+        button_row.addStretch()
+        button_row.addWidget(self.laps_copy_password_btn)
+        button_row.addWidget(self.laps_show_password_btn)
+        layout.addLayout(button_row)
+
+        layout.addStretch()
+        return tab
+
+    def build_location_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        self.location_edit = QLineEdit(self.original_location)
+        self.location_edit.textChanged.connect(self.refresh_apply_button_state)
+        form.addRow("Location:", self.location_edit)
+        return tab
+
+    def build_managed_by_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+
+        name_row = QHBoxLayout()
+        self.managed_by_name_edit = QLineEdit(self.original_managed_by)
+        self.managed_by_name_edit.textChanged.connect(self._on_managed_by_changed)
+        self.managed_by_change_btn = QPushButton("Change")
+        self.managed_by_properties_btn = QPushButton("Properties")
+        self.managed_by_clear_btn = QPushButton("Clear")
+        self.managed_by_change_btn.clicked.connect(self.select_managed_by)
+        self.managed_by_clear_btn.clicked.connect(self.clear_managed_by)
+
+        name_row.addWidget(self.managed_by_name_edit)
+        name_row.addWidget(self.managed_by_change_btn)
+        name_row.addWidget(self.managed_by_properties_btn)
+        name_row.addWidget(self.managed_by_clear_btn)
+
+        name_container = QWidget()
+        name_container.setLayout(name_row)
+        form.addRow("Name:", name_container)
+
+        self.managed_by_office_edit = self._readonly_line(self._single_attr(attrs, "physicalDeliveryOfficeName"))
+        self.managed_by_street_edit = QTextEdit()
+        self.managed_by_street_edit.setReadOnly(True)
+        self.managed_by_street_edit.setPlainText(self._single_attr(attrs, "streetAddress"))
+        self.managed_by_state_edit = self._readonly_line(self._single_attr(attrs, "st"))
+        self.managed_by_country_edit = self._readonly_line(self._single_attr(attrs, "co"))
+        self.managed_by_phone_edit = self._readonly_line(self._single_attr(attrs, "telephoneNumber"))
+        self.managed_by_fax_edit = self._readonly_line(self._single_attr(attrs, "facsimileTelephoneNumber"))
+
+        form.addRow("Office:", self.managed_by_office_edit)
+        form.addRow("Street:", self.managed_by_street_edit)
+        form.addRow("State/Province:", self.managed_by_state_edit)
+        form.addRow("Country/Region:", self.managed_by_country_edit)
+        form.addRow("Telephone Number:", self.managed_by_phone_edit)
+        form.addRow("Fax Number:", self.managed_by_fax_edit)
+
+        self.refresh_managed_by_buttons()
+        return tab
+
+    def _current_member_of_dns(self) -> list[str]:
+        dns: list[str] = []
+        for row in range(self.member_of_table.rowCount()):
+            dn_item = self.member_of_table.item(row, 1)
+            if dn_item and dn_item.text().strip():
+                dns.append(dn_item.text().strip())
+        return dns
+
+    def add_group_memberships(self) -> None:
+        group_search_base = self.ldap.get_default_naming_context() or self.search_base
+        dlg = SelectDirectoryObjectsDialog(
+            self.ldap,
+            group_search_base,
+            self,
+            search_options=[("Groups", SEARCH_FILTER_GROUPS)],
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        existing_dns = set(self._current_member_of_dns())
+        for obj in dlg.selected_objects():
+            if obj.object_type != "Group" or obj.dn in existing_dns:
+                continue
+            row = self.member_of_table.rowCount()
+            self.member_of_table.insertRow(row)
+            name_item = QTableWidgetItem(obj.name)
+            name_item.setIcon(icon_for_directory_object(self.style(), obj))
+            self.member_of_table.setItem(row, 0, name_item)
+            self.member_of_table.setItem(row, 1, QTableWidgetItem(obj.dn))
+            existing_dns.add(obj.dn)
+        self.refresh_apply_button_state()
+
+    def remove_selected_group_memberships(self) -> None:
+        rows = sorted({idx.row() for idx in self.member_of_table.selectionModel().selectedRows()}, reverse=True)
+        for row in rows:
+            self.member_of_table.removeRow(row)
+        self.refresh_apply_button_state()
+
+    def _on_managed_by_changed(self) -> None:
+        self.refresh_managed_by_buttons()
+        self.refresh_apply_button_state()
+
+    def refresh_managed_by_buttons(self) -> None:
+        has_value = bool(self.managed_by_name_edit.text().strip())
+        self.managed_by_properties_btn.setEnabled(has_value)
+        self.managed_by_clear_btn.setEnabled(has_value)
+
+    def select_managed_by(self) -> None:
+        dlg = SelectDirectoryObjectsDialog(self.ldap, self.search_base, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected = dlg.selected_objects()
+        if not selected:
+            return
+        self.managed_by_name_edit.setText(selected[0].dn)
+
+    def clear_managed_by(self) -> None:
+        self.managed_by_name_edit.clear()
+
+    def has_pending_changes(self) -> bool:
+        if self.description_edit.text().strip() != self.original_description:
+            return True
+        if self.location_edit.text().strip() != self.original_location:
+            return True
+        if self.managed_by_name_edit.text().strip() != self.original_managed_by:
+            return True
+
+        current_groups = sorted(self._current_member_of_dns(), key=str.lower)
+        if current_groups != sorted(self.original_group_dns, key=str.lower):
+            return True
+
+        return False
+
+    def refresh_apply_button_state(self) -> None:
+        if self.apply_button:
+            self.apply_button.setEnabled(self.has_pending_changes())
+
+    def apply_member_of_changes(self) -> None:
+        desired = set(self._current_member_of_dns())
+        original = set(self.original_group_dns)
+
+        add_dns = sorted(desired - original)
+        remove_dns = sorted(original - desired)
+
+        for group_dn in add_dns:
+            self.ldap.add_group_member(group_dn, self.computer_obj.dn)
+        for group_dn in remove_dns:
+            self.ldap.remove_group_member(group_dn, self.computer_obj.dn)
+
+        self.original_group_dns = sorted(desired, key=str.lower)
+
+    def apply_attribute_changes(self) -> None:
+        description_value = self.description_edit.text().strip()
+        if description_value != self.original_description:
+            self.ldap.replace_object_attribute_values(self.computer_obj.dn, "description", [description_value] if description_value else [])
+            self.original_description = description_value
+
+        location_value = self.location_edit.text().strip()
+        if location_value != self.original_location:
+            self.ldap.replace_object_attribute_values(self.computer_obj.dn, "location", [location_value] if location_value else [])
+            self.original_location = location_value
+
+        managed_by_value = self.managed_by_name_edit.text().strip()
+        if managed_by_value != self.original_managed_by:
+            self.ldap.replace_object_attribute_values(self.computer_obj.dn, "managedBy", [managed_by_value] if managed_by_value else [])
+            self.original_managed_by = managed_by_value
+
+    def apply_changes(self) -> bool:
+        try:
+            self.apply_member_of_changes()
+            self.apply_attribute_changes()
+        except Exception as e:
+            QMessageBox.critical(self, "Apply failed", str(e))
+            return False
+
+        self.refresh_apply_button_state()
+        return True
+
+    def on_ok(self) -> None:
+        if self.apply_changes():
+            self.accept()
 
 
 class UserPropertiesDialog(QDialog):
@@ -3458,6 +3865,8 @@ class MainWindow(QMainWindow):
             dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         elif obj.object_type == "User":
             dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+        elif obj.object_type == "Computer" and search_base:
+            dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         else:
             dlg = PropertiesDialog(obj, attrs, self)
         dlg.exec()
