@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
 
-from PySide6.QtCore import QDate, QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import QDateTime, QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
     QMenu,
     QInputDialog,
     QDialog,
+    QButtonGroup,
     QDialogButtonBox,
-    QDateEdit,
+    QDateTimeEdit,
     QFileDialog,
     QAbstractItemView,
     QFormLayout,
@@ -1823,6 +1824,12 @@ class ComputerPropertiesDialog(QDialog):
         self.delegate_any_radio = QRadioButton("Trust this computer for delegation to any service (Kerberos only)")
         self.delegate_specified_radio = QRadioButton("Trust this computer for delegation to specified services only")
 
+        self.delegation_mode_group = QButtonGroup(self)
+        self.delegation_mode_group.setExclusive(True)
+        self.delegation_mode_group.addButton(self.delegate_none_radio)
+        self.delegation_mode_group.addButton(self.delegate_any_radio)
+        self.delegation_mode_group.addButton(self.delegate_specified_radio)
+
         self.delegate_none_radio.toggled.connect(self.refresh_delegation_controls)
         self.delegate_any_radio.toggled.connect(self.refresh_delegation_controls)
         self.delegate_specified_radio.toggled.connect(self.refresh_delegation_controls)
@@ -1836,6 +1843,10 @@ class ComputerPropertiesDialog(QDialog):
         protocol_layout.setContentsMargins(24, 0, 0, 0)
         self.delegate_kerberos_only_radio = QRadioButton("Use Kerberos only")
         self.delegate_any_auth_radio = QRadioButton("Use any authentication protocol")
+        self.delegation_protocol_group = QButtonGroup(self)
+        self.delegation_protocol_group.setExclusive(True)
+        self.delegation_protocol_group.addButton(self.delegate_kerberos_only_radio)
+        self.delegation_protocol_group.addButton(self.delegate_any_auth_radio)
         self.delegate_kerberos_only_radio.toggled.connect(self.refresh_apply_button_state)
         self.delegate_any_auth_radio.toggled.connect(self.refresh_apply_button_state)
         protocol_layout.addWidget(self.delegate_kerberos_only_radio)
@@ -1916,8 +1927,9 @@ class ComputerPropertiesDialog(QDialog):
         form.addRow("Current LAPS password expiration:", self.laps_expiry_edit)
 
         expiry_row = QHBoxLayout()
-        self.laps_new_expiry_picker = QDateEdit(QDate.currentDate())
+        self.laps_new_expiry_picker = QDateTimeEdit(QDateTime.currentDateTime())
         self.laps_new_expiry_picker.setCalendarPopup(True)
+        self.laps_new_expiry_picker.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.laps_expire_now_btn = QPushButton("Expire Now")
         expiry_row.addWidget(self.laps_new_expiry_picker)
         expiry_row.addWidget(self.laps_expire_now_btn)
@@ -2066,6 +2078,8 @@ class ComputerPropertiesDialog(QDialog):
         return "none"
 
     def refresh_delegation_controls(self) -> None:
+        if not (self.delegate_none_radio.isChecked() or self.delegate_any_radio.isChecked() or self.delegate_specified_radio.isChecked()):
+            self.delegate_none_radio.setChecked(True)
         specified_only = self.delegate_specified_radio.isChecked()
         self.delegate_kerberos_only_radio.setEnabled(specified_only)
         self.delegate_any_auth_radio.setEnabled(specified_only)
@@ -4874,6 +4888,7 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
 
+        rename_action = None
         add_to_group_action = None
         if any(o.object_type in {"User", "Computer", "Group"} for o in selected_objects):
             add_to_group_action = menu.addAction("Add to group...")
@@ -4903,6 +4918,8 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         cut_action = menu.addAction("Cut")
         delete_action = menu.addAction("Delete")
+        if is_single and obj.object_type in {"User", "Group"}:
+            rename_action = menu.addAction("Rename")
 
         menu.addSeparator()
         properties_action = menu.addAction("Properties")
@@ -4916,7 +4933,6 @@ class MainWindow(QMainWindow):
 
         copy_dn_action = None
         export_list_action = None
-        rename_action = None
 
         open_action = None
         if is_single and obj.is_container:
@@ -4970,6 +4986,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Cut", "Cut is not implemented yet.")
         elif chosen == delete_action:
             self.delete_selected_objects()
+        elif rename_action is not None and chosen == rename_action:
+            self.rename_selected_object()
         elif chosen == properties_action:
             self.open_properties(obj)
         elif chosen == help_action:
