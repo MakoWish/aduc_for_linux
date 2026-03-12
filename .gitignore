@@ -1,4 +1,5 @@
 notes.txt
 dist/*
-packaging/*
-scripts/*
+packaging
+scripts
+__pychache__
