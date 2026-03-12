@@ -81,7 +81,12 @@ The installer will:
 
 ### Build from Source
 
-If you would like to build this project directly from source, download the [latest.zip](https://github.com/MakoWish/aduc_for_linux/archive/refs/tags/latest.zip) or [latest.tar.gz](https://github.com/MakoWish/aduc_for_linux/archive/refs/tags/latest.tar.gz) and build:
+If you would like to build this project directly from source, download the latest archive:
+
+- [Source code (zip)](https://github.com/MakoWish/aduc_for_linux/archive/refs/tags/latest.zip)
+- [Source code (tar.gz)](https://github.com/MakoWish/aduc_for_linux/archive/refs/tags/latest.tar.gz)
+
+... and compile:
 
 ```bash
 make check
