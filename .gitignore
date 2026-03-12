@@ -2,4 +2,4 @@ notes.txt
 dist/*
 packaging/
 scripts/
-__pychache__/
+__pycache__
