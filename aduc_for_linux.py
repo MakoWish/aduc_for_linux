@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTimeEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -1605,6 +1606,12 @@ class PropertiesDialog(QDialog):
 
 
 class ComputerPropertiesDialog(QDialog):
+    PRIMARY_GROUP_ID_TO_DC_TYPE = {
+        "515": "Computer",
+        "516": "Domain Controller",
+        "521": "Read-only Domain Controller",
+    }
+
     NON_EDITABLE_ATTRIBUTES = {
         "distinguishedName",
         "objectClass",
@@ -1686,6 +1693,13 @@ class ComputerPropertiesDialog(QDialog):
         edit.setReadOnly(True)
         return edit
 
+    def _dc_type_display_value(self, attrs: dict[str, list[str]]) -> str:
+        primary_group_id = self._single_attr(attrs, "primaryGroupID")
+        if not primary_group_id:
+            return "Computer"
+
+        return self.PRIMARY_GROUP_ID_TO_DC_TYPE.get(primary_group_id, f"Unknown ({primary_group_id})")
+
     def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -1706,7 +1720,7 @@ class ComputerPropertiesDialog(QDialog):
 
         form = QFormLayout()
         self.dns_name_edit = self._readonly_line(self._single_attr(attrs, "dNSHostName") or obj.name)
-        self.dc_type_edit = self._readonly_line(self._single_attr(attrs, "primaryGroupID") or "Computer")
+        self.dc_type_edit = self._readonly_line(self._dc_type_display_value(attrs))
         self.site_edit = self._readonly_line(self._single_attr(attrs, "msDS-SiteName"))
         self.description_edit = QLineEdit(self.original_description)
         self.description_edit.textChanged.connect(self.refresh_apply_button_state)
@@ -1929,6 +1943,9 @@ class ComputerPropertiesDialog(QDialog):
         expiry_row = QHBoxLayout()
         self.laps_new_expiry_picker = QDateTimeEdit(QDateTime.currentDateTime())
         self.laps_new_expiry_picker.setCalendarPopup(True)
+        laps_calendar = self.laps_new_expiry_picker.calendarWidget()
+        laps_calendar.setFirstDayOfWeek(Qt.Sunday)
+        laps_calendar.clicked.connect(self._on_laps_calendar_date_selected)
         self.laps_new_expiry_picker.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.laps_expire_now_btn = QPushButton("Expire Now")
         expiry_row.addWidget(self.laps_new_expiry_picker)
@@ -1958,6 +1975,29 @@ class ComputerPropertiesDialog(QDialog):
 
         layout.addStretch()
         return tab
+
+    def _on_laps_calendar_date_selected(self, *_args: object) -> None:
+        selected_datetime = self.laps_new_expiry_picker.dateTime()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Expiration Time")
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.addWidget(QLabel("Select time for the chosen date:"))
+
+        time_edit = QTimeEdit(selected_datetime.time())
+        time_edit.setDisplayFormat("HH:mm:ss")
+        dialog_layout.addWidget(time_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_datetime.setTime(time_edit.time())
+        self.laps_new_expiry_picker.setDateTime(selected_datetime)
 
     def build_location_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
@@ -1989,14 +2029,14 @@ class ComputerPropertiesDialog(QDialog):
         name_container.setLayout(name_row)
         form.addRow("Name:", name_container)
 
-        self.managed_by_office_edit = self._readonly_line(self._single_attr(attrs, "physicalDeliveryOfficeName"))
+        self.managed_by_office_edit = self._readonly_line("")
         self.managed_by_street_edit = QTextEdit()
         self.managed_by_street_edit.setReadOnly(True)
-        self.managed_by_street_edit.setPlainText(self._single_attr(attrs, "streetAddress"))
-        self.managed_by_state_edit = self._readonly_line(self._single_attr(attrs, "st"))
-        self.managed_by_country_edit = self._readonly_line(self._single_attr(attrs, "co"))
-        self.managed_by_phone_edit = self._readonly_line(self._single_attr(attrs, "telephoneNumber"))
-        self.managed_by_fax_edit = self._readonly_line(self._single_attr(attrs, "facsimileTelephoneNumber"))
+        self.managed_by_street_edit.setPlainText("")
+        self.managed_by_state_edit = self._readonly_line("")
+        self.managed_by_country_edit = self._readonly_line("")
+        self.managed_by_phone_edit = self._readonly_line("")
+        self.managed_by_fax_edit = self._readonly_line("")
 
         form.addRow("Office:", self.managed_by_office_edit)
         form.addRow("Street:", self.managed_by_street_edit)
@@ -2005,6 +2045,7 @@ class ComputerPropertiesDialog(QDialog):
         form.addRow("Telephone Number:", self.managed_by_phone_edit)
         form.addRow("Fax Number:", self.managed_by_fax_edit)
 
+        self._load_managed_by_details(self.original_managed_by)
         self.refresh_managed_by_buttons()
         return tab
 
@@ -2157,8 +2198,31 @@ class ComputerPropertiesDialog(QDialog):
         self.refresh_apply_button_state()
 
     def _on_managed_by_changed(self) -> None:
+        if not self.managed_by_name_edit.text().strip():
+            self._set_managed_by_details({})
         self.refresh_managed_by_buttons()
         self.refresh_apply_button_state()
+
+    def _set_managed_by_details(self, managed_by_attrs: dict[str, list[str]]) -> None:
+        self.managed_by_office_edit.setText(self._single_attr(managed_by_attrs, "physicalDeliveryOfficeName"))
+        self.managed_by_street_edit.setPlainText(self._single_attr(managed_by_attrs, "streetAddress"))
+        self.managed_by_state_edit.setText(self._single_attr(managed_by_attrs, "st"))
+        self.managed_by_country_edit.setText(self._single_attr(managed_by_attrs, "co"))
+        self.managed_by_phone_edit.setText(self._single_attr(managed_by_attrs, "telephoneNumber"))
+        self.managed_by_fax_edit.setText(self._single_attr(managed_by_attrs, "facsimileTelephoneNumber"))
+
+    def _load_managed_by_details(self, managed_by_dn: str) -> None:
+        managed_by_dn = managed_by_dn.strip()
+        if not managed_by_dn:
+            self._set_managed_by_details({})
+            return
+
+        try:
+            managed_by_attrs = self.ldap.get_object_attributes(managed_by_dn)
+        except Exception:
+            managed_by_attrs = {}
+
+        self._set_managed_by_details(managed_by_attrs)
 
     def refresh_managed_by_buttons(self) -> None:
         has_value = bool(self.managed_by_name_edit.text().strip())
@@ -2166,16 +2230,27 @@ class ComputerPropertiesDialog(QDialog):
         self.managed_by_clear_btn.setEnabled(has_value)
 
     def select_managed_by(self) -> None:
-        dlg = SelectDirectoryObjectsDialog(self.ldap, self.search_base, self)
+        managed_by_search_base = self.ldap.get_default_naming_context() or self.search_base
+        dlg = SelectDirectoryObjectsDialog(
+            self.ldap,
+            managed_by_search_base,
+            self,
+            search_options=[
+                ("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS),
+                ("Groups", SEARCH_FILTER_GROUPS),
+            ],
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         selected = dlg.selected_objects()
         if not selected:
             return
         self.managed_by_name_edit.setText(selected[0].dn)
+        self._load_managed_by_details(selected[0].dn)
 
     def clear_managed_by(self) -> None:
         self.managed_by_name_edit.clear()
+        self._set_managed_by_details({})
 
     def has_pending_changes(self) -> bool:
         if self.description_edit.text().strip() != self.original_description:
