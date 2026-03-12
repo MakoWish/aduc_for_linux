@@ -51,7 +51,7 @@ Python dependencies are listed in `requirements.txt` and installed into a virtua
 
 ### Debian package (recommended)
 
-Download the latest `.deb` from [GitHub Releases](https://github.com/MakoWish/aduc_for_linux/releases), then install it:
+Download the latest `.deb` from [GitHub Releases](https://github.com/MakoWish/aduc_for_linux/releases/latest), then install it:
 
 ```bash
 sudo dpkg -i aduc-for-linux_<version>_all.deb
@@ -81,7 +81,7 @@ The installer will:
 
 ### Build from Source
 
-If you would like to build this project directly from source, clone this repo to your machine and run:
+If you would like to build this project directly from source, download the [latest.zip](https://github.com/MakoWish/aduc_for_linux/archive/refs/tags/latest.zip) or [latest.tar.gz](https://github.com/MakoWish/aduc_for_linux/archive/refs/tags/latest.tar.gz) and build:
 
 ```bash
 make check
