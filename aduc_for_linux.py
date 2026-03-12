@@ -2206,7 +2206,16 @@ class ComputerPropertiesDialog(QDialog):
         self.managed_by_clear_btn.setEnabled(has_value)
 
     def select_managed_by(self) -> None:
-        dlg = SelectDirectoryObjectsDialog(self.ldap, self.search_base, self)
+        managed_by_search_base = self.ldap.get_default_naming_context() or self.search_base
+        dlg = SelectDirectoryObjectsDialog(
+            self.ldap,
+            managed_by_search_base,
+            self,
+            search_options=[
+                ("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS),
+                ("Groups", SEARCH_FILTER_GROUPS),
+            ],
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         selected = dlg.selected_objects()
