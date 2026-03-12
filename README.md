@@ -79,6 +79,17 @@ The installer will:
 4. Create a `.desktop` launcher entry.
 5. Install a local `VERSION` file used by the app startup update check.
 
+### Build from Source
+
+If you would like to build this project directly from source, clone this repo to your machine and run:
+
+```bash
+make check
+make build-deb
+```
+
+The compiled `.deb` package will be placed in `./dist/aduc-for-linux_<version>_all.deb`.
+
 #### Running Manually (without launcher)
 
 ```bash
