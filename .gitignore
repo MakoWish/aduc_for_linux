@@ -1,3 +1,4 @@
 notes.txt
 dist/*
+packaging/build/
 __pycache__
