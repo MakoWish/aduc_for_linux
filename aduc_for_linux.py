@@ -1605,6 +1605,12 @@ class PropertiesDialog(QDialog):
 
 
 class ComputerPropertiesDialog(QDialog):
+    PRIMARY_GROUP_ID_TO_DC_TYPE = {
+        "515": "Computer",
+        "516": "Domain Controller",
+        "521": "Read-only Domain Controller",
+    }
+
     NON_EDITABLE_ATTRIBUTES = {
         "distinguishedName",
         "objectClass",
@@ -1686,6 +1692,13 @@ class ComputerPropertiesDialog(QDialog):
         edit.setReadOnly(True)
         return edit
 
+    def _dc_type_display_value(self, attrs: dict[str, list[str]]) -> str:
+        primary_group_id = self._single_attr(attrs, "primaryGroupID")
+        if not primary_group_id:
+            return "Computer"
+
+        return self.PRIMARY_GROUP_ID_TO_DC_TYPE.get(primary_group_id, f"Unknown ({primary_group_id})")
+
     def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -1706,7 +1719,7 @@ class ComputerPropertiesDialog(QDialog):
 
         form = QFormLayout()
         self.dns_name_edit = self._readonly_line(self._single_attr(attrs, "dNSHostName") or obj.name)
-        self.dc_type_edit = self._readonly_line(self._single_attr(attrs, "primaryGroupID") or "Computer")
+        self.dc_type_edit = self._readonly_line(self._dc_type_display_value(attrs))
         self.site_edit = self._readonly_line(self._single_attr(attrs, "msDS-SiteName"))
         self.description_edit = QLineEdit(self.original_description)
         self.description_edit.textChanged.connect(self.refresh_apply_button_state)
@@ -1929,6 +1942,7 @@ class ComputerPropertiesDialog(QDialog):
         expiry_row = QHBoxLayout()
         self.laps_new_expiry_picker = QDateTimeEdit(QDateTime.currentDateTime())
         self.laps_new_expiry_picker.setCalendarPopup(True)
+        self.laps_new_expiry_picker.calendarWidget().setFirstDayOfWeek(Qt.Sunday)
         self.laps_new_expiry_picker.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.laps_expire_now_btn = QPushButton("Expire Now")
         expiry_row.addWidget(self.laps_new_expiry_picker)
