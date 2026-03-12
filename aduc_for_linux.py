@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTimeEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -1942,7 +1943,9 @@ class ComputerPropertiesDialog(QDialog):
         expiry_row = QHBoxLayout()
         self.laps_new_expiry_picker = QDateTimeEdit(QDateTime.currentDateTime())
         self.laps_new_expiry_picker.setCalendarPopup(True)
-        self.laps_new_expiry_picker.calendarWidget().setFirstDayOfWeek(Qt.Sunday)
+        laps_calendar = self.laps_new_expiry_picker.calendarWidget()
+        laps_calendar.setFirstDayOfWeek(Qt.Sunday)
+        laps_calendar.clicked.connect(self._on_laps_calendar_date_selected)
         self.laps_new_expiry_picker.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self.laps_expire_now_btn = QPushButton("Expire Now")
         expiry_row.addWidget(self.laps_new_expiry_picker)
@@ -1972,6 +1975,29 @@ class ComputerPropertiesDialog(QDialog):
 
         layout.addStretch()
         return tab
+
+    def _on_laps_calendar_date_selected(self, *_args: object) -> None:
+        selected_datetime = self.laps_new_expiry_picker.dateTime()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Expiration Time")
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.addWidget(QLabel("Select time for the chosen date:"))
+
+        time_edit = QTimeEdit(selected_datetime.time())
+        time_edit.setDisplayFormat("HH:mm:ss")
+        dialog_layout.addWidget(time_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_datetime.setTime(time_edit.time())
+        self.laps_new_expiry_picker.setDateTime(selected_datetime)
 
     def build_location_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
