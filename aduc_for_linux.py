@@ -1091,6 +1091,75 @@ class LdapManager:
         groups.sort(key=lambda x: x.name.lower())
         return groups
 
+    def get_object_primary_group(self, dn: str) -> Optional[LdapObject]:
+        if not self.conn:
+            return None
+
+        self.conn.search(
+            search_base=dn,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["primaryGroupID", "objectSid"],
+        )
+        if not self.conn.entries:
+            return None
+
+        entry = self.conn.entries[0]
+        try:
+            primary_group_id = str(entry.primaryGroupID.value)
+            object_sid = str(entry.objectSid.value)
+        except Exception:
+            return None
+
+        if not primary_group_id or not object_sid or "-" not in object_sid:
+            return None
+
+        domain_sid = object_sid.rsplit("-", 1)[0]
+        primary_group_sid = f"{domain_sid}-{primary_group_id}"
+
+        self.conn.search(
+            search_base=self.default_naming_context,
+            search_filter=f"(objectSid={primary_group_sid})",
+            search_scope=SUBTREE,
+            attributes=[
+                "distinguishedName",
+                "name",
+                "cn",
+                "objectClass",
+                "description",
+                "userAccountControl",
+                "lockoutTime",
+            ],
+            size_limit=1,
+        )
+        if not self.conn.entries:
+            return None
+
+        group_entry = self.conn.entries[0]
+        group_dn = str(group_entry.entry_dn)
+        object_classes = [str(x).lower() for x in group_entry.objectClass.values] if "objectClass" in group_entry else []
+        name = self._display_name(group_entry, object_classes, group_dn)
+        description = ""
+        if "description" in group_entry:
+            try:
+                values = group_entry.description.values
+                if isinstance(values, list) and values:
+                    description = str(values[0])
+                elif values:
+                    description = str(values)
+            except Exception:
+                description = ""
+
+        return LdapObject(
+            dn=group_dn,
+            name=name,
+            object_classes=object_classes,
+            description=description,
+            user_disabled=self._is_user_disabled(group_entry, object_classes),
+            user_locked=self._is_user_locked(group_entry, object_classes),
+            computer_disabled=self._is_computer_disabled(group_entry, object_classes),
+        )
+
     def replace_group_members(self, group_dn: str, member_dns: list[str]) -> None:
         if not self.conn:
             return
@@ -1531,6 +1600,19 @@ class PropertiesDialog(QDialog):
 
 
 class ComputerPropertiesDialog(QDialog):
+    NON_EDITABLE_ATTRIBUTES = {
+        "distinguishedName",
+        "objectClass",
+        "objectGUID",
+        "objectSid",
+        "whenCreated",
+        "whenChanged",
+        "uSNCreated",
+        "uSNChanged",
+        "memberOf",
+        "member",
+    }
+
     def __init__(
         self,
         ldap: LdapManager,
@@ -1546,9 +1628,15 @@ class ComputerPropertiesDialog(QDialog):
         self.computer_obj = obj
         self.search_base = search_base
         self.original_group_dns: list[str] = sorted(attrs.get("memberOf", []), key=str.lower)
+        self.primary_group_dn: Optional[str] = None
         self.original_description = self._single_attr(attrs, "description")
         self.original_location = self._single_attr(attrs, "location")
         self.original_managed_by = self._single_attr(attrs, "managedBy")
+
+        self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
+        self.selected_attribute: Optional[str] = None
+        self.attribute_name_label: Optional[QLabel] = None
+        self.attribute_value_edit: Optional[QTextEdit] = None
 
         self.apply_button: Optional[QPushButton] = None
 
@@ -1560,6 +1648,7 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_laps_tab(attrs), "LAPS")
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
+        tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -1637,13 +1726,27 @@ class ComputerPropertiesDialog(QDialog):
         self.member_of_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.member_of_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.member_of_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.member_of_table.itemSelectionChanged.connect(self.refresh_member_of_remove_button_state)
 
-        groups = attrs.get("memberOf", [])
+        groups = list(attrs.get("memberOf", []))
+        primary_group = self.ldap.get_object_primary_group(self.computer_obj.dn)
+        if primary_group is not None:
+            self.primary_group_dn = primary_group.dn
+            if primary_group.dn not in groups:
+                groups.append(primary_group.dn)
+
         self.member_of_table.setRowCount(len(groups))
         for row, dn in enumerate(sorted(groups, key=str.lower)):
             short_name = dn.split(",", 1)[0].split("=", 1)[-1] if "=" in dn else dn
-            self.member_of_table.setItem(row, 0, QTableWidgetItem(short_name))
-            self.member_of_table.setItem(row, 1, QTableWidgetItem(dn))
+            name_item = QTableWidgetItem(short_name)
+            dn_item = QTableWidgetItem(dn)
+            is_primary = bool(self.primary_group_dn and dn.lower() == self.primary_group_dn.lower())
+            dn_item.setData(Qt.UserRole, is_primary)
+            if is_primary:
+                name_item.setToolTip("Primary group")
+                dn_item.setToolTip("Primary group")
+            self.member_of_table.setItem(row, 0, name_item)
+            self.member_of_table.setItem(row, 1, dn_item)
 
         button_row = QHBoxLayout()
         self.member_of_add_btn = QPushButton("Add...")
@@ -1660,6 +1763,7 @@ class ComputerPropertiesDialog(QDialog):
 
         layout.addWidget(self.member_of_table)
         layout.addLayout(button_row)
+        self.refresh_member_of_remove_button_state()
         return tab
 
     def build_delegation_tab(self) -> QWidget:
@@ -1676,19 +1780,28 @@ class ComputerPropertiesDialog(QDialog):
         self.delegate_specified_radio = QRadioButton("Trust this computer for delegation to specified services only")
         self.delegate_none_radio.setChecked(True)
 
+        self.delegate_none_radio.toggled.connect(self.refresh_delegation_controls)
+        self.delegate_any_radio.toggled.connect(self.refresh_delegation_controls)
+        self.delegate_specified_radio.toggled.connect(self.refresh_delegation_controls)
+
         layout.addWidget(self.delegate_none_radio)
         layout.addWidget(self.delegate_any_radio)
         layout.addWidget(self.delegate_specified_radio)
 
-        protocol_row = QHBoxLayout()
-        protocol_row.addSpacing(24)
+        protocol_row_1 = QHBoxLayout()
+        protocol_row_1.addSpacing(24)
         self.delegate_kerberos_only_radio = QRadioButton("Use Kerberos only")
+        protocol_row_1.addWidget(self.delegate_kerberos_only_radio)
+        protocol_row_1.addStretch()
+        layout.addLayout(protocol_row_1)
+
+        protocol_row_2 = QHBoxLayout()
+        protocol_row_2.addSpacing(24)
         self.delegate_any_auth_radio = QRadioButton("Use any authentication protocol")
+        protocol_row_2.addWidget(self.delegate_any_auth_radio)
+        protocol_row_2.addStretch()
+        layout.addLayout(protocol_row_2)
         self.delegate_kerberos_only_radio.setChecked(True)
-        protocol_row.addWidget(self.delegate_kerberos_only_radio)
-        protocol_row.addWidget(self.delegate_any_auth_radio)
-        protocol_row.addStretch()
-        layout.addLayout(protocol_row)
 
         layout.addWidget(QLabel("Services to which this account can present delegated credentials:"))
 
@@ -1702,6 +1815,7 @@ class ComputerPropertiesDialog(QDialog):
         self.delegation_services_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.delegation_services_table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.delegation_services_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.delegation_services_table.itemSelectionChanged.connect(self.refresh_delegation_controls)
         layout.addWidget(self.delegation_services_table)
 
         service_button_row = QHBoxLayout()
@@ -1715,6 +1829,7 @@ class ComputerPropertiesDialog(QDialog):
         layout.addLayout(service_button_row)
 
         layout.addStretch()
+        self.refresh_delegation_controls()
         return tab
 
     def build_laps_tab(self, attrs: dict[str, list[str]]) -> QWidget:
@@ -1812,13 +1927,77 @@ class ComputerPropertiesDialog(QDialog):
         self.refresh_managed_by_buttons()
         return tab
 
-    def _current_member_of_dns(self) -> list[str]:
+    def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        editor_layout = QHBoxLayout()
+        self.attributes_list = QListWidget()
+        for attr_name in sorted(attrs, key=str.lower):
+            self.attributes_list.addItem(attr_name)
+        self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
+
+        right_col = QVBoxLayout()
+        self.attribute_name_label = QLabel("Select an attribute")
+        self.attribute_value_edit = QTextEdit()
+        self.attribute_value_edit.setReadOnly(True)
+        right_col.addWidget(self.attribute_name_label)
+        right_col.addWidget(self.attribute_value_edit)
+
+        editor_layout.addWidget(self.attributes_list, 1)
+        editor_layout.addLayout(right_col, 2)
+        layout.addLayout(editor_layout)
+
+        if self.attributes_list.count() > 0:
+            self.attributes_list.setCurrentRow(0)
+        return tab
+
+    def on_attribute_selected(self, attr_name: str) -> None:
+        if not self.attribute_name_label or not self.attribute_value_edit:
+            return
+
+        if not attr_name:
+            self.attribute_name_label.setText("Select an attribute")
+            self.attribute_value_edit.clear()
+            return
+
+        values = self.attribute_values.get(attr_name, [])
+        is_read_only = attr_name in self.NON_EDITABLE_ATTRIBUTES
+        self.attribute_name_label.setText(
+            f"{attr_name} {'(read-only)' if is_read_only else '(editable in AD)'}"
+        )
+        self.attribute_value_edit.setPlainText("\n".join(values))
+
+    def _current_member_of_dns(self, include_primary: bool = False) -> list[str]:
         dns: list[str] = []
         for row in range(self.member_of_table.rowCount()):
             dn_item = self.member_of_table.item(row, 1)
-            if dn_item and dn_item.text().strip():
-                dns.append(dn_item.text().strip())
+            if not dn_item or not dn_item.text().strip():
+                continue
+            is_primary = bool(dn_item.data(Qt.UserRole))
+            if is_primary and not include_primary:
+                continue
+            dns.append(dn_item.text().strip())
         return dns
+
+    def refresh_member_of_remove_button_state(self) -> None:
+        can_remove = False
+        for idx in self.member_of_table.selectionModel().selectedRows():
+            dn_item = self.member_of_table.item(idx.row(), 1)
+            if dn_item and not bool(dn_item.data(Qt.UserRole)):
+                can_remove = True
+                break
+        self.member_of_remove_btn.setEnabled(can_remove)
+
+    def refresh_delegation_controls(self) -> None:
+        specified_only = self.delegate_specified_radio.isChecked()
+        self.delegate_kerberos_only_radio.setEnabled(specified_only)
+        self.delegate_any_auth_radio.setEnabled(specified_only)
+        self.delegation_add_btn.setEnabled(specified_only)
+
+        has_selection = bool(self.delegation_services_table.selectionModel().selectedRows())
+        has_rows = self.delegation_services_table.rowCount() > 0
+        self.delegation_remove_btn.setEnabled(specified_only and has_rows and has_selection)
 
     def add_group_memberships(self) -> None:
         group_search_base = self.ldap.get_default_naming_context() or self.search_base
@@ -1831,7 +2010,7 @@ class ComputerPropertiesDialog(QDialog):
         if dlg.exec() != QDialog.Accepted:
             return
 
-        existing_dns = set(self._current_member_of_dns())
+        existing_dns = set(self._current_member_of_dns(include_primary=True))
         for obj in dlg.selected_objects():
             if obj.object_type != "Group" or obj.dn in existing_dns:
                 continue
@@ -1839,15 +2018,22 @@ class ComputerPropertiesDialog(QDialog):
             self.member_of_table.insertRow(row)
             name_item = QTableWidgetItem(obj.name)
             name_item.setIcon(icon_for_directory_object(self.style(), obj))
+            dn_item = QTableWidgetItem(obj.dn)
+            dn_item.setData(Qt.UserRole, False)
             self.member_of_table.setItem(row, 0, name_item)
-            self.member_of_table.setItem(row, 1, QTableWidgetItem(obj.dn))
+            self.member_of_table.setItem(row, 1, dn_item)
             existing_dns.add(obj.dn)
+        self.refresh_member_of_remove_button_state()
         self.refresh_apply_button_state()
 
     def remove_selected_group_memberships(self) -> None:
         rows = sorted({idx.row() for idx in self.member_of_table.selectionModel().selectedRows()}, reverse=True)
         for row in rows:
+            dn_item = self.member_of_table.item(row, 1)
+            if dn_item and bool(dn_item.data(Qt.UserRole)):
+                continue
             self.member_of_table.removeRow(row)
+        self.refresh_member_of_remove_button_state()
         self.refresh_apply_button_state()
 
     def _on_managed_by_changed(self) -> None:
@@ -1974,6 +2160,7 @@ class UserPropertiesDialog(QDialog):
         self.user_obj = obj
         self.search_base = search_base
         self.original_group_dns: list[str] = []
+        self.primary_group_dn: Optional[str] = None
         self.current_uac_value = 0
         self.initially_locked = False
         self.uac_checkboxes: list[tuple[QCheckBox, int]] = []
@@ -2106,14 +2293,30 @@ class UserPropertiesDialog(QDialog):
         self.member_of_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.member_of_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.member_of_table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.member_of_table.itemSelectionChanged.connect(self.refresh_member_of_remove_button_state)
 
-        groups = attrs.get("memberOf", [])
-        self.member_of_table.setRowCount(len(groups))
+        groups = list(attrs.get("memberOf", []))
         self.original_group_dns = sorted(groups, key=str.lower)
+
+        self.primary_group_dn = None
+        primary_group = self.ldap.get_object_primary_group(self.user_obj.dn)
+        if primary_group is not None:
+            self.primary_group_dn = primary_group.dn
+            if primary_group.dn not in groups:
+                groups.append(primary_group.dn)
+
+        self.member_of_table.setRowCount(len(groups))
         for row, dn in enumerate(sorted(groups, key=str.lower)):
             short_name = dn.split(",", 1)[0].split("=", 1)[-1] if "=" in dn else dn
-            self.member_of_table.setItem(row, 0, QTableWidgetItem(short_name))
-            self.member_of_table.setItem(row, 1, QTableWidgetItem(dn))
+            name_item = QTableWidgetItem(short_name)
+            dn_item = QTableWidgetItem(dn)
+            is_primary = bool(self.primary_group_dn and dn.lower() == self.primary_group_dn.lower())
+            dn_item.setData(Qt.UserRole, is_primary)
+            if is_primary:
+                name_item.setToolTip("Primary group")
+                dn_item.setToolTip("Primary group")
+            self.member_of_table.setItem(row, 0, name_item)
+            self.member_of_table.setItem(row, 1, dn_item)
 
         button_row = QHBoxLayout()
         self.member_of_add_btn = QPushButton("Add...")
@@ -2128,15 +2331,29 @@ class UserPropertiesDialog(QDialog):
         self.member_of_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         layout.addWidget(self.member_of_table)
         layout.addLayout(button_row)
+        self.refresh_member_of_remove_button_state()
         return tab
 
-    def _current_member_of_dns(self) -> list[str]:
+    def _current_member_of_dns(self, include_primary: bool = False) -> list[str]:
         dns: list[str] = []
         for row in range(self.member_of_table.rowCount()):
             dn_item = self.member_of_table.item(row, 1)
-            if dn_item and dn_item.text().strip():
-                dns.append(dn_item.text().strip())
+            if not dn_item or not dn_item.text().strip():
+                continue
+            is_primary = bool(dn_item.data(Qt.UserRole))
+            if is_primary and not include_primary:
+                continue
+            dns.append(dn_item.text().strip())
         return dns
+
+    def refresh_member_of_remove_button_state(self) -> None:
+        can_remove = False
+        for idx in self.member_of_table.selectionModel().selectedRows():
+            dn_item = self.member_of_table.item(idx.row(), 1)
+            if dn_item and not bool(dn_item.data(Qt.UserRole)):
+                can_remove = True
+                break
+        self.member_of_remove_btn.setEnabled(can_remove)
 
     def add_group_memberships(self) -> None:
         group_search_base = self.ldap.get_default_naming_context() or self.search_base
@@ -2149,7 +2366,7 @@ class UserPropertiesDialog(QDialog):
         if dlg.exec() != QDialog.Accepted:
             return
 
-        existing_dns = set(self._current_member_of_dns())
+        existing_dns = set(self._current_member_of_dns(include_primary=True))
         for obj in dlg.selected_objects():
             if obj.object_type != "Group" or obj.dn in existing_dns:
                 continue
@@ -2157,15 +2374,22 @@ class UserPropertiesDialog(QDialog):
             self.member_of_table.insertRow(row)
             name_item = QTableWidgetItem(obj.name)
             name_item.setIcon(icon_for_directory_object(self.style(), obj))
+            dn_item = QTableWidgetItem(obj.dn)
+            dn_item.setData(Qt.UserRole, False)
             self.member_of_table.setItem(row, 0, name_item)
-            self.member_of_table.setItem(row, 1, QTableWidgetItem(obj.dn))
+            self.member_of_table.setItem(row, 1, dn_item)
             existing_dns.add(obj.dn)
+        self.refresh_member_of_remove_button_state()
         self.refresh_apply_button_state()
 
     def remove_selected_group_memberships(self) -> None:
         rows = sorted({idx.row() for idx in self.member_of_table.selectionModel().selectedRows()}, reverse=True)
         for row in rows:
+            dn_item = self.member_of_table.item(row, 1)
+            if dn_item and bool(dn_item.data(Qt.UserRole)):
+                continue
             self.member_of_table.removeRow(row)
+        self.refresh_member_of_remove_button_state()
         self.refresh_apply_button_state()
 
     def _edited_uac_and_unlock(self) -> tuple[int, bool]:
