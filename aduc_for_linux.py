@@ -1117,8 +1117,12 @@ class LdapManager:
         domain_sid = object_sid.rsplit("-", 1)[0]
         primary_group_sid = f"{domain_sid}-{primary_group_id}"
 
+        search_base = self.get_default_naming_context()
+        if not search_base:
+            return None
+
         self.conn.search(
-            search_base=self.default_naming_context,
+            search_base=search_base,
             search_filter=f"(objectSid={primary_group_sid})",
             search_scope=SUBTREE,
             attributes=[
