@@ -2029,14 +2029,14 @@ class ComputerPropertiesDialog(QDialog):
         name_container.setLayout(name_row)
         form.addRow("Name:", name_container)
 
-        self.managed_by_office_edit = self._readonly_line(self._single_attr(attrs, "physicalDeliveryOfficeName"))
+        self.managed_by_office_edit = self._readonly_line("")
         self.managed_by_street_edit = QTextEdit()
         self.managed_by_street_edit.setReadOnly(True)
-        self.managed_by_street_edit.setPlainText(self._single_attr(attrs, "streetAddress"))
-        self.managed_by_state_edit = self._readonly_line(self._single_attr(attrs, "st"))
-        self.managed_by_country_edit = self._readonly_line(self._single_attr(attrs, "co"))
-        self.managed_by_phone_edit = self._readonly_line(self._single_attr(attrs, "telephoneNumber"))
-        self.managed_by_fax_edit = self._readonly_line(self._single_attr(attrs, "facsimileTelephoneNumber"))
+        self.managed_by_street_edit.setPlainText("")
+        self.managed_by_state_edit = self._readonly_line("")
+        self.managed_by_country_edit = self._readonly_line("")
+        self.managed_by_phone_edit = self._readonly_line("")
+        self.managed_by_fax_edit = self._readonly_line("")
 
         form.addRow("Office:", self.managed_by_office_edit)
         form.addRow("Street:", self.managed_by_street_edit)
@@ -2045,6 +2045,7 @@ class ComputerPropertiesDialog(QDialog):
         form.addRow("Telephone Number:", self.managed_by_phone_edit)
         form.addRow("Fax Number:", self.managed_by_fax_edit)
 
+        self._load_managed_by_details(self.original_managed_by)
         self.refresh_managed_by_buttons()
         return tab
 
@@ -2197,8 +2198,31 @@ class ComputerPropertiesDialog(QDialog):
         self.refresh_apply_button_state()
 
     def _on_managed_by_changed(self) -> None:
+        if not self.managed_by_name_edit.text().strip():
+            self._set_managed_by_details({})
         self.refresh_managed_by_buttons()
         self.refresh_apply_button_state()
+
+    def _set_managed_by_details(self, managed_by_attrs: dict[str, list[str]]) -> None:
+        self.managed_by_office_edit.setText(self._single_attr(managed_by_attrs, "physicalDeliveryOfficeName"))
+        self.managed_by_street_edit.setPlainText(self._single_attr(managed_by_attrs, "streetAddress"))
+        self.managed_by_state_edit.setText(self._single_attr(managed_by_attrs, "st"))
+        self.managed_by_country_edit.setText(self._single_attr(managed_by_attrs, "co"))
+        self.managed_by_phone_edit.setText(self._single_attr(managed_by_attrs, "telephoneNumber"))
+        self.managed_by_fax_edit.setText(self._single_attr(managed_by_attrs, "facsimileTelephoneNumber"))
+
+    def _load_managed_by_details(self, managed_by_dn: str) -> None:
+        managed_by_dn = managed_by_dn.strip()
+        if not managed_by_dn:
+            self._set_managed_by_details({})
+            return
+
+        try:
+            managed_by_attrs = self.ldap.get_object_attributes(managed_by_dn)
+        except Exception:
+            managed_by_attrs = {}
+
+        self._set_managed_by_details(managed_by_attrs)
 
     def refresh_managed_by_buttons(self) -> None:
         has_value = bool(self.managed_by_name_edit.text().strip())
@@ -2222,9 +2246,11 @@ class ComputerPropertiesDialog(QDialog):
         if not selected:
             return
         self.managed_by_name_edit.setText(selected[0].dn)
+        self._load_managed_by_details(selected[0].dn)
 
     def clear_managed_by(self) -> None:
         self.managed_by_name_edit.clear()
+        self._set_managed_by_details({})
 
     def has_pending_changes(self) -> bool:
         if self.description_edit.text().strip() != self.original_description:
