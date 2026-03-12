@@ -1,0 +1,9 @@
+Package: aduc-for-linux
+Version: 0.2.3
+Section: admin
+Priority: optional
+Architecture: all
+Maintainer: ADUC for Linux Contributors
+Depends: python3, python3-venv
+Description: Active Directory Users and Computers for Linux
+ A lightweight ADUC-style GUI for Linux desktops.

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=ADUC for Linux
+Comment=Active Directory Users and Computers for Linux
+Exec=/opt/aduc_for_linux/venv/bin/python /opt/aduc_for_linux/aduc_for_linux.py
+Icon=/opt/aduc_for_linux/app_icon.png
+Terminal=false
+Categories=System;Utility;
+StartupNotify=true
