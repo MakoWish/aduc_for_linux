@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-APP_DIR="/opt/aduc_for_linux"
-if [[ "$1" == "remove" || "$1" == "purge" ]]; then
-    rm -rf "${APP_DIR}/venv"
-fi
-
-exit 0

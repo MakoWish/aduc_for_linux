@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec /opt/aduc_for_linux/venv/bin/python /opt/aduc_for_linux/aduc_for_linux.py "$@"
