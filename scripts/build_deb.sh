@@ -18,6 +18,7 @@ mkdir -p "${STAGING_DIR}/opt/aduc_for_linux"
 install -m 0755 "${ROOT_DIR}/aduc_for_linux.py" "${STAGING_DIR}/opt/aduc_for_linux/aduc_for_linux.py"
 install -m 0644 "${ROOT_DIR}/requirements.txt" "${STAGING_DIR}/opt/aduc_for_linux/requirements.txt"
 install -m 0644 "${ROOT_DIR}/app_icon.png" "${STAGING_DIR}/opt/aduc_for_linux/app_icon.png"
+install -m 0644 "${ROOT_DIR}/image.png" "${STAGING_DIR}/opt/aduc_for_linux/image.png"
 install -m 0644 "${ROOT_DIR}/VERSION" "${STAGING_DIR}/opt/aduc_for_linux/VERSION"
 
 sed -i "s/__VERSION__/${VERSION}/" "${DEBIAN_DIR}/control"
