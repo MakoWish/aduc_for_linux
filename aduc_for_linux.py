@@ -161,6 +161,21 @@ class CredentialStore:
             pass
 
 
+WELL_KNOWN_SID_LABELS = {
+    "S-1-0-0": "Nobody",
+    "S-1-1-0": "Everyone",
+    "S-1-2-0": "Local",
+    "S-1-2-1": "Console Logon",
+    "S-1-3-0": "Creator Owner",
+    "S-1-3-1": "Creator Group",
+    "S-1-3-4": "Owner Rights",
+    "S-1-5-11": "Authenticated Users",
+    "S-1-5-18": "LOCAL SYSTEM",
+    "S-1-5-19": "NT AUTHORITY\\Local Service",
+    "S-1-5-20": "NT AUTHORITY\\Network Service",
+}
+
+
 def parse_sid(sid_bytes: bytes) -> str:
     if len(sid_bytes) < 8:
         return "<invalid SID>"
@@ -1947,6 +1962,8 @@ class OptionsDialog(QDialog):
 
 
 class SecurityAclEditor(QWidget):
+    changed = Signal()
+
     PERMISSIONS: list[tuple[str, int]] = [
         ("Full Control", 0x10000000),
         ("Read", 0x80000000),
@@ -1965,7 +1982,7 @@ class SecurityAclEditor(QWidget):
     for _, _perm_mask in PERMISSIONS:
         MAPPED_PERMISSION_MASK |= _perm_mask
 
-    def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None) -> None:
+    def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None, show_apply_button: bool = True) -> None:
         super().__init__(parent)
         self.ldap = ldap
         self.object_dn = object_dn
@@ -2014,7 +2031,8 @@ class SecurityAclEditor(QWidget):
         self.meta_label = QLabel("")
         self.advanced_btn = QPushButton("Advanced")
         self.advanced_btn.setEnabled(False)
-        self.apply_btn = QPushButton("Apply Security")
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setVisible(show_apply_button)
         bottom_row.addWidget(self.meta_label, 1)
         bottom_row.addWidget(self.advanced_btn)
         bottom_row.addWidget(self.apply_btn)
@@ -2087,12 +2105,17 @@ class SecurityAclEditor(QWidget):
 
         if self.principal_list.count() > 0:
             self.principal_list.setCurrentRow(0)
-        self.meta_label.setText(f"Owner: {self.owner_sid}   Group: {self.group_sid}")
+        self.meta_label.setText("")
+        self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
 
     def resolve_sid_label(self, sid: str) -> str:
         cached = self.display_by_sid.get(sid)
         if cached:
             return cached
+
+        if sid in WELL_KNOWN_SID_LABELS:
+            self.display_by_sid[sid] = WELL_KNOWN_SID_LABELS[sid]
+            return WELL_KNOWN_SID_LABELS[sid]
 
         display_name = ""
         sam_name = ""
@@ -2185,6 +2208,7 @@ class SecurityAclEditor(QWidget):
         if self._loading_permissions:
             return
         self._capture_permission_checkboxes()
+        self.changed.emit()
 
     def add_principal(self) -> None:
         dlg = SelectDirectoryObjectsDialog(
@@ -2209,6 +2233,7 @@ class SecurityAclEditor(QWidget):
             self.principals[sid] = {"allow": 0, "deny": 0}
         self.display_by_sid[sid] = f"{display} ({sid})"
         self.refresh_principal_list(select_sid=sid)
+        self.changed.emit()
 
     def remove_selected_principal(self) -> None:
         item = self.principal_list.currentItem()
@@ -2218,6 +2243,7 @@ class SecurityAclEditor(QWidget):
         if sid in self.principals:
             del self.principals[sid]
         self.refresh_principal_list()
+        self.changed.emit()
 
     def refresh_principal_list(self, select_sid: str = "") -> None:
         self.principal_list.clear()
@@ -2292,21 +2318,28 @@ class SecurityAclEditor(QWidget):
             "deny": deny_mask | deny_unmapped,
         }
 
-    def apply_security_changes(self) -> None:
+    def has_pending_changes(self) -> bool:
+        self._capture_permission_checkboxes()
+        if not hasattr(self, "_original_principals"):
+            return False
+        return self.principals != self._original_principals
+
+    def apply_security_changes(self) -> bool:
         self._capture_permission_checkboxes()
         try:
             sd = self._build_security_descriptor()
             self.ldap.set_security_descriptor(self.object_dn, sd)
         except Exception as e:
             QMessageBox.critical(self, "Apply security failed", str(e))
-            return
+            return False
 
-        QMessageBox.information(self, "Security", "Security permissions were updated.")
-        self.reload_from_directory()
+        self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
+        self.changed.emit()
+        return True
 
 
-def build_acl_viewer_tab(ldap: LdapManager, object_dn: str, search_base: str) -> QWidget:
-    return SecurityAclEditor(ldap, object_dn, search_base)
+def build_acl_viewer_tab(ldap: LdapManager, object_dn: str, search_base: str, show_apply_button: bool = True) -> QWidget:
+    return SecurityAclEditor(ldap, object_dn, search_base, show_apply_button=show_apply_button)
 
 
 class PropertiesDialog(QDialog):
@@ -2427,7 +2460,9 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
         tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
-        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
+        self.security_editor = build_acl_viewer_tab(self.ldap, obj.dn, self.search_base, show_apply_button=False)
+        self.security_editor.changed.connect(self.refresh_apply_button_state)
+        tabs.addTab(self.security_editor, "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3031,6 +3066,9 @@ class ComputerPropertiesDialog(QDialog):
             if self._delegation_services_from_table() != self.original_delegation_services:
                 return True
 
+        if self.security_editor.has_pending_changes():
+            return True
+
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -3093,6 +3131,8 @@ class ComputerPropertiesDialog(QDialog):
             self.apply_member_of_changes()
             self.apply_attribute_changes()
             self.apply_delegation_changes()
+            if not self.security_editor.apply_security_changes():
+                return False
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
@@ -3164,7 +3204,9 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
         tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
-        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
+        self.security_editor = build_acl_viewer_tab(self.ldap, obj.dn, self.search_base, show_apply_button=False)
+        self.security_editor.changed.connect(self.refresh_apply_button_state)
+        tabs.addTab(self.security_editor, "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3409,6 +3451,9 @@ class UserPropertiesDialog(QDialog):
             if current_values != original_values:
                 return True
 
+        if self.security_editor.has_pending_changes():
+            return True
+
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -3462,6 +3507,8 @@ class UserPropertiesDialog(QDialog):
             self.apply_account_changes()
             self.apply_member_of_changes()
             self.apply_attribute_changes()
+            if not self.security_editor.apply_security_changes():
+                return
             self.refresh_apply_button_state()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
@@ -3471,6 +3518,8 @@ class UserPropertiesDialog(QDialog):
             self.apply_account_changes()
             self.apply_member_of_changes()
             self.apply_attribute_changes()
+            if not self.security_editor.apply_security_changes():
+                return
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return
@@ -3912,7 +3961,9 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
 
-        tabs.addTab(build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base), "Security")
+        self.security_editor = build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base, show_apply_button=False)
+        self.security_editor.changed.connect(self.refresh_apply_button_state)
+        tabs.addTab(self.security_editor, "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -4027,6 +4078,8 @@ class GroupPropertiesDialog(QDialog):
             return True
         if self.current_member_dns() != self.original_member_dns:
             return True
+        if self.security_editor.has_pending_changes():
+            return True
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -4060,6 +4113,8 @@ class GroupPropertiesDialog(QDialog):
             if member_dns != self.original_member_dns:
                 self.ldap.replace_group_members(self.group_obj.dn, member_dns)
                 self.original_member_dns = member_dns
+            if not self.security_editor.apply_security_changes():
+                return False
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
