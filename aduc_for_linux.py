@@ -2326,8 +2326,11 @@ class SecurityAclEditor(QWidget):
             return False
         return self.principals != self._original_principals
 
-    def apply_security_changes(self) -> bool:
+    def apply_security_changes(self, reload_after_save: bool = True) -> bool:
         self._capture_permission_checkboxes()
+        if not self.has_pending_changes():
+            return True
+
         try:
             sd = self._build_security_descriptor()
             self.ldap.set_security_descriptor(self.object_dn, sd)
@@ -2335,8 +2338,11 @@ class SecurityAclEditor(QWidget):
             QMessageBox.critical(self, "Apply security failed", str(e))
             return False
 
-        self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
-        self.changed.emit()
+        if reload_after_save:
+            self.reload_from_directory()
+        else:
+            self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
+            self.changed.emit()
         return True
 
 
