@@ -7,6 +7,7 @@ REPO_RAW_BASE="https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main"
 
 PY_FILE="aduc_for_linux.py"
 ICON_FILE="app_icon.png"
+SPLASH_FILE="image.png"
 REQ_FILE="requirements.txt"
 VERSION_FILE="VERSION"
 
@@ -118,11 +119,13 @@ fetch_files() {
     echo "Downloading files..."
     download_file "${REPO_RAW_BASE}/${PY_FILE}"   "${tmpdir}/${PY_FILE}"
     download_file "${REPO_RAW_BASE}/${ICON_FILE}" "${tmpdir}/${ICON_FILE}"
+    download_file "${REPO_RAW_BASE}/${SPLASH_FILE}" "${tmpdir}/${SPLASH_FILE}"
     download_file "${REPO_RAW_BASE}/${REQ_FILE}"  "${tmpdir}/${REQ_FILE}"
     download_file "${REPO_RAW_BASE}/${VERSION_FILE}" "${tmpdir}/${VERSION_FILE}"
 
     install -m 0755 "${tmpdir}/${PY_FILE}"   "${INSTALL_DIR}/${PY_FILE}"
     install -m 0644 "${tmpdir}/${ICON_FILE}" "${INSTALL_DIR}/${ICON_FILE}"
+    install -m 0644 "${tmpdir}/${SPLASH_FILE}" "${INSTALL_DIR}/${SPLASH_FILE}"
     install -m 0644 "${tmpdir}/${REQ_FILE}"  "${INSTALL_DIR}/${REQ_FILE}"
     install -m 0644 "${tmpdir}/${VERSION_FILE}" "${INSTALL_DIR}/${VERSION_FILE}"
 }
