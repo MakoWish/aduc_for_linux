@@ -1787,6 +1787,7 @@ class ConnectDialog(QDialog):
         saved_port: int = 636,
         profiles: Optional[list[ConnectionProfile]] = None,
         selected_profile: str = "",
+        auto_connect: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1809,6 +1810,11 @@ class ConnectDialog(QDialog):
         idx = self.auth_mode_combo.findData(auth_mode)
         if idx >= 0:
             self.auth_mode_combo.setCurrentIndex(idx)
+
+        self.auto_connect_combo = QComboBox()
+        self.auto_connect_combo.addItem("Disabled", False)
+        self.auto_connect_combo.addItem("Enabled", True)
+        self.auto_connect_combo.setCurrentIndex(1 if auto_connect else 0)
 
         self.profile_name_edit = QLineEdit(selected_profile)
         self.save_profile_checkbox = QCheckBox("Save/update this connection profile")
@@ -1837,6 +1843,7 @@ class ConnectDialog(QDialog):
         form.addRow("Profile:", self.profile_combo)
         form.addRow("Profile name:", self.profile_name_edit)
         form.addRow("Authentication:", self.auth_mode_combo)
+        form.addRow("Auto-connect on launch:", self.auto_connect_combo)
         form.addRow("Server:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Bind user:", self.bind_user_edit)
@@ -1873,6 +1880,9 @@ class ConnectDialog(QDialog):
 
     def selected_auth_mode(self) -> str:
         return str(self.auth_mode_combo.currentData())
+
+    def selected_auto_connect(self) -> bool:
+        return bool(self.auto_connect_combo.currentData())
 
     def selected_profile_name(self) -> str:
         return self.profile_name_edit.text().strip()
@@ -4737,10 +4747,6 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self.refresh_current)
         file_menu.addAction(refresh_action)
 
-        options_action = QAction("Options", self)
-        options_action.triggered.connect(self.show_options_dialog)
-        file_menu.addAction(options_action)
-
         file_menu.addSeparator()
 
         exit_action = QAction("Exit", self)
@@ -5115,15 +5121,6 @@ class MainWindow(QMainWindow):
             self.show_error("Auto-connect failed", str(e))
             return
 
-    def show_options_dialog(self) -> None:
-        dlg = OptionsDialog(self.auth_mode, self.auto_connect, self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        self.auth_mode = dlg.selected_auth_mode()
-        self.auto_connect = dlg.selected_auto_connect()
-        self.save_settings()
-
     def show_connect_dialog(self) -> None:
         dlg = ConnectDialog(
             self.auth_mode,
@@ -5131,6 +5128,7 @@ class MainWindow(QMainWindow):
             self.saved_port,
             profiles=self.connection_profiles,
             selected_profile=self.active_profile_name,
+            auto_connect=self.auto_connect,
             parent=self,
         )
         if dlg.exec() != QDialog.Accepted:
@@ -5138,6 +5136,7 @@ class MainWindow(QMainWindow):
 
         host, port, bind_user, password = dlg.values()
         self.auth_mode = dlg.selected_auth_mode()
+        self.auto_connect = dlg.selected_auto_connect()
 
         try:
             if self.auth_mode == "kerberos":
