@@ -36,6 +36,7 @@ It is intentionally small and focused: one Python app, one installer script, and
 - Create users, groups, computers, and organizational units from Action/context menus.
 - Basic ADUC-like iconography and object-state overlays.
 - Support Kerberos authentication.
+- Savable connection profiles with secure password storage in system keyring.
 - Simple `.deb` package installation.
 - Desktop launcher installation for ease of of opening from Application Launcher.
 - Startup version check against GitHub with update prompt when a newer release is available.
