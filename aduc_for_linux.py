@@ -262,8 +262,20 @@ def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
         ace_bytes = dacl_data[cursor: cursor + ace_size]
         mask = struct.unpack("<I", ace_bytes[4:8])[0] if len(ace_bytes) >= 8 else 0
         sid = ""
-        if len(ace_bytes) >= 16:
-            sid = parse_sid(ace_bytes[8:])
+
+        sid_offset = 8
+        if ace_type in (0x05, 0x06) and len(ace_bytes) >= 12:
+            # ACCESS_ALLOWED_OBJECT_ACE / ACCESS_DENIED_OBJECT_ACE:
+            # ACE header (4) + mask (4) + flags (4) + optional GUIDs + SID.
+            object_flags = struct.unpack("<I", ace_bytes[8:12])[0]
+            sid_offset = 12
+            if object_flags & 0x1:
+                sid_offset += 16
+            if object_flags & 0x2:
+                sid_offset += 16
+
+        if len(ace_bytes) > sid_offset:
+            sid = parse_sid(ace_bytes[sid_offset:])
 
         out["dacl"].append(
             {
@@ -1916,15 +1928,12 @@ class OptionsDialog(QDialog):
         return str(self.auth_mode_combo.currentData())
 
     def selected_auto_connect(self) -> bool:
-        if self.selected_auth_mode() == "credentials":
-            return False
         return bool(self.auto_connect_combo.currentData())
 
     def update_auto_connect_state(self) -> None:
-        using_credentials = self.selected_auth_mode() == "credentials"
-        if using_credentials:
-            self.auto_connect_combo.setCurrentIndex(0)
-        self.auto_connect_combo.setEnabled(not using_credentials)
+        # Auto-connect is supported for both credentials (when keyring credentials exist)
+        # and Kerberos profiles.
+        self.auto_connect_combo.setEnabled(True)
 
 
 class SecurityAclEditor(QWidget):
@@ -2035,9 +2044,9 @@ class SecurityAclEditor(QWidget):
             entry = self.principals.setdefault(sid, {"allow": 0, "deny": 0})
             ace_type = int(ace.get("ace_type", -1))
             mask_value = int(ace.get("mask_value", 0))
-            if ace_type == 0x00:
+            if ace_type in (0x00, 0x05):
                 entry["allow"] |= mask_value
-            elif ace_type == 0x01:
+            elif ace_type in (0x01, 0x06):
                 entry["deny"] |= mask_value
 
         self.principal_list.clear()
@@ -2055,29 +2064,49 @@ class SecurityAclEditor(QWidget):
         cached = self.display_by_sid.get(sid)
         if cached:
             return cached
-        label = sid
+
+        display_name = ""
+        sam_name = ""
+        netbios_hint = ""
         try:
             if self.ldap.conn:
-                base_dn = self.ldap.get_default_naming_context() or self.search_base
-                if base_dn:
-                    self.ldap.conn.search(
-                        search_base=base_dn,
-                        search_filter=f"(objectSid={sid})",
-                        search_scope=SUBTREE,
-                        attributes=["displayName", "cn", "name"],
-                        size_limit=1,
-                    )
-                    if self.ldap.conn.entries:
-                        entry = self.ldap.conn.entries[0]
-                        for attr in ["displayName", "cn", "name"]:
-                            values = self.ldap._entry_attr_values(entry, attr)
-                            if values:
-                                label = values[0]
-                                break
-        except Exception:
-            label = sid
+                # AD-specific SID bind form resolves across partitions better than objectSid filters.
+                self.ldap.conn.search(
+                    search_base=f"<SID={sid}>",
+                    search_filter="(objectClass=*)",
+                    search_scope=BASE,
+                    attributes=["displayName", "sAMAccountName", "cn", "name", "distinguishedName"],
+                )
+                if self.ldap.conn.entries:
+                    entry = self.ldap.conn.entries[0]
+                    for attr in ["displayName", "cn", "name"]:
+                        values = self.ldap._entry_attr_values(entry, attr)
+                        if values:
+                            display_name = values[0]
+                            break
+                    sam_values = self.ldap._entry_attr_values(entry, "sAMAccountName")
+                    if sam_values:
+                        sam_name = sam_values[0]
 
-        rendered = f"{label} ({sid})"
+                    dn_values = self.ldap._entry_attr_values(entry, "distinguishedName")
+                    if dn_values:
+                        dn = dn_values[0]
+                        dc_parts = [part[3:] for part in dn.split(",") if part.upper().startswith("DC=")]
+                        if dc_parts:
+                            netbios_hint = dc_parts[0].upper()
+        except Exception:
+            pass
+
+        if not display_name and sam_name:
+            display_name = sam_name
+        if not display_name:
+            rendered = sid
+        elif sam_name:
+            qualifier = f"{netbios_hint}\{sam_name}" if netbios_hint else sam_name
+            rendered = f"{display_name} ({qualifier})"
+        else:
+            rendered = display_name
+
         self.display_by_sid[sid] = rendered
         return rendered
 
