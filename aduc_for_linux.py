@@ -177,6 +177,9 @@ WELL_KNOWN_SID_LABELS = {
 }
 
 
+CREATOR_SIDS = {"S-1-3-0", "S-1-3-1"}
+CREATOR_INHERIT_ACE_FLAGS = 0x0B  # OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE
+
 def parse_sid(sid_bytes: bytes) -> str:
     if len(sid_bytes) < 8:
         return "<invalid SID>"
@@ -2318,12 +2321,13 @@ class SecurityAclEditor(QWidget):
             allow_mask = int(data.get("allow", 0))
             deny_mask = int(data.get("deny", 0))
 
+            ace_flags = CREATOR_INHERIT_ACE_FLAGS if sid in CREATOR_SIDS else 0x00
             if deny_mask:
                 ace_size = 8 + len(sid_bytes)
-                ace_payloads.append(bytes([0x01, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", deny_mask) + sid_bytes)
+                ace_payloads.append(bytes([0x01, ace_flags]) + struct.pack("<H", ace_size) + struct.pack("<I", deny_mask) + sid_bytes)
             if allow_mask:
                 ace_size = 8 + len(sid_bytes)
-                ace_payloads.append(bytes([0x00, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", allow_mask) + sid_bytes)
+                ace_payloads.append(bytes([0x00, ace_flags]) + struct.pack("<H", ace_size) + struct.pack("<I", allow_mask) + sid_bytes)
 
         acl_size = 8 + sum(len(ace) for ace in ace_payloads)
         header = struct.pack("<BBHHH", 0x02, 0x00, acl_size, len(ace_payloads), 0x0000)
@@ -5348,27 +5352,31 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
 
     def open_properties(self, obj: LdapObject) -> None:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             attrs = self.ldap.get_object_attributes(obj.dn)
+
+            search_base = self.current_dn
+            if not search_base:
+                top = self.tree.topLevelItem(0)
+                if top:
+                    data = top.data(0, Qt.UserRole) or {}
+                    search_base = data.get("dn")
+
+            if obj.object_type == "Group" and search_base:
+                dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+            elif obj.object_type == "User":
+                dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+            elif obj.object_type == "Computer" and search_base:
+                dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+            else:
+                dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         except Exception as e:
             self.show_error("Read failed", str(e))
             return
+        finally:
+            QApplication.restoreOverrideCursor()
 
-        search_base = self.current_dn
-        if not search_base:
-            top = self.tree.topLevelItem(0)
-            if top:
-                data = top.data(0, Qt.UserRole) or {}
-                search_base = data.get("dn")
-
-        if obj.object_type == "Group" and search_base:
-            dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
-        elif obj.object_type == "User":
-            dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
-        elif obj.object_type == "Computer" and search_base:
-            dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
-        else:
-            dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         dlg.exec()
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
