@@ -23,7 +23,7 @@ Migrating away from Windows while still managing Microsoft environments can be p
 
 It is intentionally small and focused: one Python app, one installer script, and minimal runtime dependencies. Additional features will continue to be added. If there is something you would like to see added, please open an Issue and request it!
 
-**_NOTE_**: Also works against Samba LDAP domain controllers.
+**_NOTE_**: Also works against **_Samba Active Directory_** domain controllers!
 
 ## Features (current)
 
