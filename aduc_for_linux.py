@@ -169,6 +169,7 @@ WELL_KNOWN_SID_LABELS = {
     "S-1-3-0": "Creator Owner",
     "S-1-3-1": "Creator Group",
     "S-1-3-4": "Owner Rights",
+    "S-1-5-10": "Principal Self",
     "S-1-5-11": "Authenticated Users",
     "S-1-5-18": "LOCAL SYSTEM",
     "S-1-5-19": "NT AUTHORITY\\Local Service",
@@ -1067,7 +1068,7 @@ class LdapManager:
             return "(objectClass=organizationalUnit)"
         if search_mode == SEARCH_FILTER_GROUPS:
             return "(objectClass=group)"
-        return "(|(objectClass=user)(objectClass=group)(objectClass=contact))"
+        return "(|(objectClass=user)(objectClass=group))"
 
     def _build_search_filter(self, term: str, search_mode: str) -> str:
         safe_term = self._escape_search_term(term)
@@ -2211,11 +2212,12 @@ class SecurityAclEditor(QWidget):
         self.changed.emit()
 
     def add_principal(self) -> None:
+        principal_search_base = self.ldap.get_default_naming_context() or self.search_base
         dlg = SelectDirectoryObjectsDialog(
             self.ldap,
-            self.search_base,
+            principal_search_base,
             self,
-            search_options=[("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS)],
+            search_options=[("Users and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS)],
         )
         if dlg.exec() != QDialog.Accepted:
             return
@@ -3841,9 +3843,7 @@ class SelectDirectoryObjectsDialog(QDialog):
         layout.addWidget(buttons)
 
     def run_search(self, *_args) -> None:
-        term = self.search_edit.text().strip()
-        if not term:
-            return
+        term = self.search_edit.text().strip() or "*"
 
         try:
             results = self.ldap.search_directory_objects(
