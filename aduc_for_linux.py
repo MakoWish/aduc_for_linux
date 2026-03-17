@@ -2126,7 +2126,6 @@ class SecurityAclEditor(QWidget):
         return rendered
 
     def on_principal_changed(self) -> None:
-        self._capture_permission_checkboxes()
         item = self.principal_list.currentItem()
         self.remove_btn.setEnabled(item is not None)
         if item is None:
