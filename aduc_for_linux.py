@@ -110,7 +110,6 @@ SEARCH_FILTER_OPTIONS = [
 
 KEYRING_SERVICE_NAME = "aduc-for-linux"
 
-CREDENTIAL_CACHE_FILE = os.path.join(CONFIG_DIR, "credentials.json")
 
 
 @dataclass
@@ -126,88 +125,40 @@ class ConnectionProfile:
 class CredentialStore:
     @staticmethod
     def available() -> bool:
-        return True
+        return keyring is not None
 
     @staticmethod
     def _secret_name(profile_name: str) -> str:
         return f"profile:{profile_name}"
 
     @classmethod
-    def _read_cache(cls) -> dict[str, str]:
+    def get_password(cls, profile_name: str) -> str:
+        if keyring is None:
+            return ""
         try:
-            with open(CREDENTIAL_CACHE_FILE, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except FileNotFoundError:
-            return {}
+            value = keyring.get_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name))
+            return value or ""
         except Exception:
-            return {}
-
-        if not isinstance(payload, dict):
-            return {}
-
-        out: dict[str, str] = {}
-        for key, value in payload.items():
-            k = str(key).strip()
-            if not k:
-                continue
-            out[k] = str(value)
-        return out
+            return ""
 
     @classmethod
-    def _write_cache(cls, payload: dict[str, str]) -> bool:
+    def set_password(cls, profile_name: str, password: str) -> bool:
+        if keyring is None:
+            return False
         try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            with open(CREDENTIAL_CACHE_FILE, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
-            os.chmod(CREDENTIAL_CACHE_FILE, 0o600)
+            keyring.set_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name), password)
             return True
         except Exception:
             return False
 
     @classmethod
-    def get_password(cls, profile_name: str) -> str:
-        secret = cls._secret_name(profile_name)
-
-        if keyring is not None:
-            try:
-                value = keyring.get_password(KEYRING_SERVICE_NAME, secret)
-                if value:
-                    return value
-            except Exception:
-                pass
-
-        cache = cls._read_cache()
-        return cache.get(secret, "")
-
-    @classmethod
-    def set_password(cls, profile_name: str, password: str) -> bool:
-        secret = cls._secret_name(profile_name)
-
-        if keyring is not None:
-            try:
-                keyring.set_password(KEYRING_SERVICE_NAME, secret, password)
-                return True
-            except Exception:
-                pass
-
-        cache = cls._read_cache()
-        cache[secret] = password
-        return cls._write_cache(cache)
-
-    @classmethod
     def delete_password(cls, profile_name: str) -> None:
-        secret = cls._secret_name(profile_name)
-
-        if keyring is not None:
-            try:
-                keyring.delete_password(KEYRING_SERVICE_NAME, secret)
-            except Exception:
-                pass
-
-        cache = cls._read_cache()
-        if secret in cache:
-            del cache[secret]
-            cls._write_cache(cache)
+        if keyring is None:
+            return
+        try:
+            keyring.delete_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name))
+        except Exception:
+            pass
 
 
 def parse_sid(sid_bytes: bytes) -> str:
