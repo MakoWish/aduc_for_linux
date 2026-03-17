@@ -1982,6 +1982,13 @@ class SecurityAclEditor(QWidget):
     MAPPED_PERMISSION_MASK = 0
     for _, _perm_mask in PERMISSIONS:
         MAPPED_PERMISSION_MASK |= _perm_mask
+    FULL_CONTROL_INDEX = 0
+    FULL_CONTROL_BIT = PERMISSIONS[FULL_CONTROL_INDEX][1]
+    FULL_CONTROL_EXPANDED_MASK = 0
+    for _idx, (_perm_name, _perm_mask) in enumerate(PERMISSIONS):
+        if _idx == FULL_CONTROL_INDEX:
+            continue
+        FULL_CONTROL_EXPANDED_MASK |= _perm_mask
 
     def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None, show_apply_button: bool = True) -> None:
         super().__init__(parent)
@@ -2195,8 +2202,20 @@ class SecurityAclEditor(QWidget):
         deny_mask = int(data.get("deny", 0))
         allow_unmapped = allow_mask & ~self.MAPPED_PERMISSION_MASK
         deny_unmapped = deny_mask & ~self.MAPPED_PERMISSION_MASK
+        allow_full_control = bool(
+            (allow_mask & self.FULL_CONTROL_BIT)
+            or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+        )
+        deny_full_control = bool(
+            (deny_mask & self.FULL_CONTROL_BIT)
+            or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+        )
         self._loading_permissions = True
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            if row == self.FULL_CONTROL_INDEX:
+                self.permissions_table.item(row, 1).setCheckState(Qt.Checked if allow_full_control else Qt.Unchecked)
+                self.permissions_table.item(row, 2).setCheckState(Qt.Checked if deny_full_control else Qt.Unchecked)
+                continue
             self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
             self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
         has_unmapped = bool(allow_unmapped or deny_unmapped)
@@ -2307,11 +2326,22 @@ class SecurityAclEditor(QWidget):
     def _capture_permission_checkboxes_for_sid(self, sid: str) -> None:
         allow_mask = 0
         deny_mask = 0
+        allow_full_control_checked = self.permissions_table.item(self.FULL_CONTROL_INDEX, 1).checkState() == Qt.Checked
+        deny_full_control_checked = self.permissions_table.item(self.FULL_CONTROL_INDEX, 2).checkState() == Qt.Checked
+
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            if row == self.FULL_CONTROL_INDEX:
+                continue
             if self.permissions_table.item(row, 1).checkState() == Qt.Checked:
                 allow_mask |= bit
             if self.permissions_table.item(row, 2).checkState() == Qt.Checked:
                 deny_mask |= bit
+
+        if allow_full_control_checked:
+            allow_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK
+        if deny_full_control_checked:
+            deny_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK
+
         existing = self.principals.get(sid, {"allow": 0, "deny": 0})
         allow_unmapped = int(existing.get("allow", 0)) & ~self.MAPPED_PERMISSION_MASK
         deny_unmapped = int(existing.get("deny", 0)) & ~self.MAPPED_PERMISSION_MASK
