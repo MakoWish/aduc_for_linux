@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import base64
 import json
 import os
@@ -724,10 +725,23 @@ class LdapManager:
             "raise_exceptions": True,
         }
         encrypt_value = getattr(ldap3, "ENCRYPT", "ENCRYPT")
-        try:
+        supports_session_security = "session_security" in inspect.signature(Connection.__init__).parameters
+
+        if supports_session_security:
             self.conn = Connection(self.server, session_security=encrypt_value, **kwargs)
-        except TypeError:
+            return
+
+        try:
             self.conn = Connection(self.server, **kwargs)
+        except Exception as e:
+            message = str(e)
+            if "Sign or Seal are required" in message:
+                raise ValueError(
+                    "Kerberos sign/seal is required by this server, but the installed ldap3 version "
+                    "does not support session_security. Please upgrade ldap3 in the app environment "
+                    "or use credential authentication for this domain."
+                ) from e
+            raise
 
     @staticmethod
     def _entry_attr_values(entry: Any, attr_name: str) -> list[str]:
