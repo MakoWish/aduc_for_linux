@@ -118,6 +118,7 @@ class ConnectionProfile:
     port: int
     auth_mode: str
     bind_user: str
+    store_password: bool = False
 
 
 class CredentialStore:
@@ -1855,6 +1856,9 @@ class ConnectDialog(QDialog):
     def on_profile_selected(self) -> None:
         selected = str(self.profile_combo.currentData() or "")
         if not selected:
+            self.save_profile_checkbox.setChecked(False)
+            self.save_password_checkbox.setChecked(False)
+            self.update_profile_controls()
             return
         for profile in self.profiles:
             if profile.name != selected:
@@ -1866,9 +1870,14 @@ class ConnectDialog(QDialog):
             idx = self.auth_mode_combo.findData(profile.auth_mode)
             if idx >= 0:
                 self.auth_mode_combo.setCurrentIndex(idx)
-            if profile.auth_mode == "credentials":
-                self.password_edit.setText(CredentialStore.get_password(profile.name))
             self.save_profile_checkbox.setChecked(True)
+            self.save_password_checkbox.setChecked(bool(profile.store_password))
+            if profile.auth_mode == "credentials":
+                if profile.store_password:
+                    self.password_edit.setText(CredentialStore.get_password(profile.name))
+                else:
+                    self.password_edit.clear()
+            self.update_profile_controls()
             break
 
     def update_auth_fields(self) -> None:
@@ -1941,6 +1950,11 @@ class SecurityAclEditor(QWidget):
         ("Full Control", 0x10000000),
         ("Read", 0x80000000),
         ("Write", 0x40000000),
+        ("Create All Child Objects", 0x00000001),
+        ("Delete All Child Objects", 0x00000002),
+        ("List Contents", 0x00000004),
+        ("Read All Properties", 0x00000010),
+        ("Write All Properties", 0x00000020),
         ("Delete", 0x00010000),
         ("Read Permissions", 0x00020000),
         ("Change Permissions", 0x00040000),
@@ -2102,7 +2116,7 @@ class SecurityAclEditor(QWidget):
         if not display_name:
             rendered = sid
         elif sam_name:
-            qualifier = f"{netbios_hint}\{sam_name}" if netbios_hint else sam_name
+            qualifier = f"{netbios_hint}\\{sam_name}" if netbios_hint else sam_name
             rendered = f"{display_name} ({qualifier})"
         else:
             rendered = display_name
@@ -4758,8 +4772,16 @@ class MainWindow(QMainWindow):
                     port = 636
                 auth_mode = str(profile.get("auth_mode", "credentials"))
                 bind_user = str(profile.get("bind_user", ""))
+                store_password = bool(profile.get("store_password", False))
                 self.connection_profiles.append(
-                    ConnectionProfile(name=name, host=host, port=port, auth_mode=auth_mode, bind_user=bind_user)
+                    ConnectionProfile(
+                        name=name,
+                        host=host,
+                        port=port,
+                        auth_mode=auth_mode,
+                        bind_user=bind_user,
+                        store_password=store_password,
+                    )
                 )
 
         active_profile = self.find_connection_profile(self.active_profile_name)
@@ -4812,6 +4834,7 @@ class MainWindow(QMainWindow):
                     "port": profile.port,
                     "auth_mode": profile.auth_mode,
                     "bind_user": profile.bind_user,
+                    "store_password": profile.store_password,
                 }
                 for profile in self.connection_profiles
             ],
@@ -4871,7 +4894,8 @@ class MainWindow(QMainWindow):
                         profile = self.find_connection_profile(self.active_profile_name)
                         if profile is not None:
                             bind_user = profile.bind_user
-                            bind_password = CredentialStore.get_password(profile.name)
+                            if profile.store_password:
+                                bind_password = CredentialStore.get_password(profile.name)
                     if not bind_user or not bind_password:
                         raise ValueError("Saved credentials are not available for auto-connect.")
                     self.ldap.connect_simple(self.saved_host, bind_user, bind_password, port=self.saved_port)
@@ -4939,17 +4963,26 @@ class MainWindow(QMainWindow):
                             port=port,
                             auth_mode=self.auth_mode,
                             bind_user=bind_user,
+                            store_password=dlg.save_password_enabled(),
                         )
                     )
+                    existing = self.connection_profiles[-1]
                 else:
                     existing.host = host
                     existing.port = port
                     existing.auth_mode = self.auth_mode
                     existing.bind_user = bind_user
+                    existing.store_password = dlg.save_password_enabled()
 
                 self.active_profile_name = profile_name
-                if dlg.save_password_enabled() and password:
-                    CredentialStore.set_password(profile_name, password)
+                if dlg.save_password_enabled():
+                    if not CredentialStore.set_password(profile_name, password):
+                        existing.store_password = False
+                        QMessageBox.warning(
+                            self,
+                            "Credential storage unavailable",
+                            "Connected successfully, but credentials could not be saved to the system keyring.",
+                        )
                 else:
                     CredentialStore.delete_password(profile_name)
 
