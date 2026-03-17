@@ -2387,8 +2387,6 @@ class SecurityAclEditor(QWidget):
 
     def apply_security_changes(self, reload_after_save: bool = True) -> bool:
         self._capture_permission_checkboxes()
-        if not self.has_pending_changes():
-            return True
 
         try:
             sd = self._build_security_descriptor()
