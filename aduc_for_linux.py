@@ -180,6 +180,16 @@ WELL_KNOWN_SID_LABELS = {
 CREATOR_SIDS = {"S-1-3-0", "S-1-3-1"}
 CREATOR_INHERIT_ACE_FLAGS = 0x0B  # OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE
 
+
+@contextmanager
+def busy_cursor() -> Any:
+    QApplication.setOverrideCursor(Qt.WaitCursor)
+    QApplication.processEvents(QEventLoop.AllEvents, 50)
+    try:
+        yield
+    finally:
+        QApplication.restoreOverrideCursor()
+
 def parse_sid(sid_bytes: bytes) -> str:
     if len(sid_bytes) < 8:
         return "<invalid SID>"
@@ -2393,15 +2403,16 @@ class SecurityAclEditor(QWidget):
         self._capture_permission_checkboxes()
 
         try:
-            sd = self._build_security_descriptor()
-            self.ldap.set_security_descriptor(self.object_dn, sd)
+            with busy_cursor():
+                sd = self._build_security_descriptor()
+                self.ldap.set_security_descriptor(self.object_dn, sd)
+                if reload_after_save:
+                    self.reload_from_directory()
         except Exception as e:
             QMessageBox.critical(self, "Apply security failed", str(e))
             return False
 
-        if reload_after_save:
-            self.reload_from_directory()
-        else:
+        if not reload_after_save:
             self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
             self.changed.emit()
         return True
@@ -3197,15 +3208,17 @@ class ComputerPropertiesDialog(QDialog):
 
     def apply_changes(self) -> bool:
         try:
-            self.apply_member_of_changes()
-            self.apply_attribute_changes()
-            self.apply_delegation_changes()
-            if not self.security_editor.apply_security_changes():
-                return False
+            with busy_cursor():
+                self.apply_member_of_changes()
+                self.apply_attribute_changes()
+                self.apply_delegation_changes()
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return False
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
 
+        self.security_editor.reload_from_directory()
         self.refresh_apply_button_state()
         return True
 
@@ -3573,22 +3586,26 @@ class UserPropertiesDialog(QDialog):
 
     def apply_changes(self) -> None:
         try:
-            self.apply_account_changes()
-            self.apply_member_of_changes()
-            self.apply_attribute_changes()
-            if not self.security_editor.apply_security_changes():
-                return
+            with busy_cursor():
+                self.apply_account_changes()
+                self.apply_member_of_changes()
+                self.apply_attribute_changes()
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return
+            self.security_editor.reload_from_directory()
             self.refresh_apply_button_state()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
 
     def on_ok(self) -> None:
         try:
-            self.apply_account_changes()
-            self.apply_member_of_changes()
-            self.apply_attribute_changes()
-            if not self.security_editor.apply_security_changes():
-                return
+            with busy_cursor():
+                self.apply_account_changes()
+                self.apply_member_of_changes()
+                self.apply_attribute_changes()
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return
+            self.security_editor.reload_from_directory()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return
@@ -4161,27 +4178,29 @@ class GroupPropertiesDialog(QDialog):
         managed_by = self.managed_by_edit.text().strip()
 
         try:
-            if sam_name != self.original_sam_name:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "sAMAccountName", [sam_name] if sam_name else [])
-                self.original_sam_name = sam_name
+            with busy_cursor():
+                if sam_name != self.original_sam_name:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "sAMAccountName", [sam_name] if sam_name else [])
+                    self.original_sam_name = sam_name
 
-            if description != self.original_description:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "description", [description] if description else [])
-                self.original_description = description
+                if description != self.original_description:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "description", [description] if description else [])
+                    self.original_description = description
 
-            if email != self.original_email:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "mail", [email] if email else [])
-                self.original_email = email
+                if email != self.original_email:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "mail", [email] if email else [])
+                    self.original_email = email
 
-            if managed_by != self.original_managed_by:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "managedBy", [managed_by] if managed_by else [])
-                self.original_managed_by = managed_by
+                if managed_by != self.original_managed_by:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "managedBy", [managed_by] if managed_by else [])
+                    self.original_managed_by = managed_by
 
-            if member_dns != self.original_member_dns:
-                self.ldap.replace_group_members(self.group_obj.dn, member_dns)
-                self.original_member_dns = member_dns
-            if not self.security_editor.apply_security_changes():
-                return False
+                if member_dns != self.original_member_dns:
+                    self.ldap.replace_group_members(self.group_obj.dn, member_dns)
+                    self.original_member_dns = member_dns
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return False
+            self.security_editor.reload_from_directory()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
