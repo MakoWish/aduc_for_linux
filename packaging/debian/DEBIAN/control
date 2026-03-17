@@ -4,6 +4,6 @@ Section: admin
 Priority: optional
 Architecture: all
 Maintainer: ADUC for Linux Contributors
-Depends: python3, python3-venv
+Depends: python3, python3-venv, python3-pip, ca-certificates
 Description: Active Directory Users and Computers for Linux
  A lightweight ADUC-style GUI for Linux desktops.

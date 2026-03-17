@@ -56,7 +56,14 @@ Python dependencies are listed in `requirements.txt` and installed into a virtua
 Download the latest `.deb` from [GitHub Releases](https://github.com/MakoWish/aduc_for_linux/releases/latest), then install it:
 
 ```bash
-sudo dpkg -i aduc-for-linux_<version>_all.deb
+sudo apt install ./aduc-for-linux_<version>_all.deb
+```
+
+Using `apt install ./package.deb` is recommended because it automatically resolves required system dependencies.
+If you use `dpkg -i` directly and see dependency errors, run:
+
+```bash
+sudo apt -f install
 ```
 
 After install, launch from your desktop menu or run:
