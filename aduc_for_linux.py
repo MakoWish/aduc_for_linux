@@ -1989,6 +1989,8 @@ class SecurityAclEditor(QWidget):
         if _idx == FULL_CONTROL_INDEX:
             continue
         FULL_CONTROL_EXPANDED_MASK |= _perm_mask
+    # Common AD "Full Control" persisted mask for directory objects.
+    FULL_CONTROL_AD_MASK = 0x000F01FF
 
     def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None, show_apply_button: bool = True) -> None:
         super().__init__(parent)
@@ -2205,10 +2207,12 @@ class SecurityAclEditor(QWidget):
         allow_full_control = bool(
             (allow_mask & self.FULL_CONTROL_BIT)
             or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+            or ((allow_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
         )
         deny_full_control = bool(
             (deny_mask & self.FULL_CONTROL_BIT)
             or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+            or ((deny_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
         )
         self._loading_permissions = True
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
@@ -2224,9 +2228,29 @@ class SecurityAclEditor(QWidget):
         self.permissions_table.item(self.special_row_index, 2).setCheckState(Qt.Checked if deny_unmapped else Qt.Unchecked)
         self._loading_permissions = False
 
-    def on_permission_item_changed(self, _item: QTableWidgetItem) -> None:
+    def on_permission_item_changed(self, item: QTableWidgetItem) -> None:
         if self._loading_permissions:
             return
+
+        row = item.row()
+        col = item.column()
+        if col in (1, 2):
+            self._loading_permissions = True
+            try:
+                if row == self.FULL_CONTROL_INDEX:
+                    state = item.checkState()
+                    for perm_row in range(len(self.PERMISSIONS)):
+                        self.permissions_table.item(perm_row, col).setCheckState(state)
+                else:
+                    all_checked = True
+                    for perm_row in range(1, len(self.PERMISSIONS)):
+                        if self.permissions_table.item(perm_row, col).checkState() != Qt.Checked:
+                            all_checked = False
+                            break
+                    self.permissions_table.item(self.FULL_CONTROL_INDEX, col).setCheckState(Qt.Checked if all_checked else Qt.Unchecked)
+            finally:
+                self._loading_permissions = False
+
         self._capture_permission_checkboxes()
         self.changed.emit()
 
@@ -2338,9 +2362,9 @@ class SecurityAclEditor(QWidget):
                 deny_mask |= bit
 
         if allow_full_control_checked:
-            allow_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK
+            allow_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK | self.FULL_CONTROL_AD_MASK
         if deny_full_control_checked:
-            deny_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK
+            deny_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK | self.FULL_CONTROL_AD_MASK
 
         existing = self.principals.get(sid, {"allow": 0, "deny": 0})
         allow_unmapped = int(existing.get("allow", 0)) & ~self.MAPPED_PERMISSION_MASK
