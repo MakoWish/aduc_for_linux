@@ -35,12 +35,15 @@ It is intentionally small and focused: one Python app, one installer script, and
   - Organizational Units
 - Create users, groups, computers, and organizational units from Action/context menus.
 - Basic ADUC-like iconography and object-state overlays.
-- Desktop launcher installation for user-only or system-wide installs.
+- Support Kerberos authentication.
+- Simple `.deb` package installation.
+- Desktop launcher installation for ease of of opening from Application Launcher.
 - Startup version check against GitHub with update prompt when a newer release is available.
 
 ## Requirements
 
 - Linux desktop environment with GUI support.
+  - Currently only packaging `.deb` for Debian/Ubuntu flavors.
 - Python 3 (with `venv` support).
 - One of:
   - `wget` or
@@ -59,14 +62,14 @@ Download the latest `.deb` from [GitHub Releases](https://github.com/MakoWish/ad
 sudo apt install ./aduc-for-linux_<version>_all.deb
 ```
 
-Using `apt install ./package.deb` is recommended because it automatically resolves required system dependencies.
+Using `apt install ./package.deb` is recommended, because it automatically resolves required system dependencies.
 If you use `dpkg -i` directly and see dependency errors, run:
 
 ```bash
 sudo apt -f install
 ```
 
-After install, launch from your desktop menu or run:
+After install, launch from your Application Launcher menu, or run:
 
 ```bash
 aduc-for-linux
@@ -82,7 +85,7 @@ If running as root, you will be prompted to install for all users or just for yo
 
 The installer will:
 
-1. Download the app files.
+1. Download required app files.
 2. Create a virtual environment.
 3. Install Python dependencies.
 4. Create a `.desktop` launcher entry.
