@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import base64
 import json
 import os
@@ -10,6 +11,7 @@ import struct
 import sys
 import urllib.error
 import urllib.request
+import ldap3
 import webbrowser
 import time
 import uuid
@@ -160,6 +162,35 @@ class CredentialStore:
         except Exception:
             pass
 
+
+WELL_KNOWN_SID_LABELS = {
+    "S-1-0-0": "Nobody",
+    "S-1-1-0": "Everyone",
+    "S-1-2-0": "Local",
+    "S-1-2-1": "Console Logon",
+    "S-1-3-0": "Creator Owner",
+    "S-1-3-1": "Creator Group",
+    "S-1-3-4": "Owner Rights",
+    "S-1-5-10": "Principal Self",
+    "S-1-5-11": "Authenticated Users",
+    "S-1-5-18": "LOCAL SYSTEM",
+    "S-1-5-19": "NT AUTHORITY\\Local Service",
+    "S-1-5-20": "NT AUTHORITY\\Network Service",
+}
+
+
+CREATOR_SIDS = {"S-1-3-0", "S-1-3-1"}
+CREATOR_INHERIT_ACE_FLAGS = 0x0B  # OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE
+
+
+@contextmanager
+def busy_cursor() -> Any:
+    QApplication.setOverrideCursor(Qt.WaitCursor)
+    QApplication.processEvents(QEventLoop.AllEvents, 50)
+    try:
+        yield
+    finally:
+        QApplication.restoreOverrideCursor()
 
 def parse_sid(sid_bytes: bytes) -> str:
     if len(sid_bytes) < 8:
@@ -687,13 +718,30 @@ class LdapManager:
     def connect_kerberos(self, host: str, port: int = 636) -> None:
         tls = Tls(validate=ssl.CERT_REQUIRED)
         self.server = Server(host, port=port, use_ssl=True, get_info=ALL, tls=tls)
-        self.conn = Connection(
-            self.server,
-            authentication=SASL,
-            sasl_mechanism="GSSAPI",
-            auto_bind=True,
-            raise_exceptions=True,
-        )
+        kwargs = {
+            "authentication": SASL,
+            "sasl_mechanism": "GSSAPI",
+            "auto_bind": True,
+            "raise_exceptions": True,
+        }
+        encrypt_value = getattr(ldap3, "ENCRYPT", "ENCRYPT")
+        supports_session_security = "session_security" in inspect.signature(Connection.__init__).parameters
+
+        if supports_session_security:
+            self.conn = Connection(self.server, session_security=encrypt_value, **kwargs)
+            return
+
+        try:
+            self.conn = Connection(self.server, **kwargs)
+        except Exception as e:
+            message = str(e)
+            if "Sign or Seal are required" in message:
+                raise ValueError(
+                    "Kerberos bind failed: this server requires SASL GSSAPI sign/seal, but ldap3 in this "
+                    "application path cannot negotiate that security layer. Use credential authentication "
+                    "for this domain, or relax the Samba LDAP strong-auth policy if acceptable in your environment."
+                ) from e
+            raise
 
     @staticmethod
     def _entry_attr_values(entry: Any, attr_name: str) -> list[str]:
@@ -1052,7 +1100,7 @@ class LdapManager:
             return "(objectClass=organizationalUnit)"
         if search_mode == SEARCH_FILTER_GROUPS:
             return "(objectClass=group)"
-        return "(|(objectClass=user)(objectClass=group)(objectClass=contact))"
+        return "(|(objectClass=user)(objectClass=group))"
 
     def _build_search_filter(self, term: str, search_mode: str) -> str:
         safe_term = self._escape_search_term(term)
@@ -1758,6 +1806,7 @@ class ConnectDialog(QDialog):
         saved_port: int = 636,
         profiles: Optional[list[ConnectionProfile]] = None,
         selected_profile: str = "",
+        auto_connect: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1781,9 +1830,16 @@ class ConnectDialog(QDialog):
         if idx >= 0:
             self.auth_mode_combo.setCurrentIndex(idx)
 
+        self.auto_connect_combo = QComboBox()
+        self.auto_connect_combo.addItem("Disabled", False)
+        self.auto_connect_combo.addItem("Enabled", True)
+        self.auto_connect_combo.setCurrentIndex(1 if auto_connect else 0)
+
         self.profile_name_edit = QLineEdit(selected_profile)
         self.save_profile_checkbox = QCheckBox("Save/update this connection profile")
         self.save_password_checkbox = QCheckBox("Save password in system keyring")
+        self.delete_profile_btn = QPushButton("Delete saved profile")
+        self.deleted_profile_names: set[str] = set()
 
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("dc01.example.com")
@@ -1805,9 +1861,13 @@ class ConnectDialog(QDialog):
             self.password_edit.setText(TEST_BIND_PASSWORD)
 
         form = QFormLayout()
-        form.addRow("Profile:", self.profile_combo)
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(self.profile_combo, 1)
+        profile_row.addWidget(self.delete_profile_btn)
+        form.addRow("Profile:", profile_row)
         form.addRow("Profile name:", self.profile_name_edit)
         form.addRow("Authentication:", self.auth_mode_combo)
+        form.addRow("Auto-connect on launch:", self.auto_connect_combo)
         form.addRow("Server:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Bind user:", self.bind_user_edit)
@@ -1826,6 +1886,7 @@ class ConnectDialog(QDialog):
         self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
         self.auth_mode_combo.currentIndexChanged.connect(self.update_auth_fields)
         self.save_profile_checkbox.toggled.connect(self.update_profile_controls)
+        self.delete_profile_btn.clicked.connect(self.delete_selected_profile)
         self.update_auth_fields()
         self.update_profile_controls()
         self.on_profile_selected()
@@ -1845,8 +1906,14 @@ class ConnectDialog(QDialog):
     def selected_auth_mode(self) -> str:
         return str(self.auth_mode_combo.currentData())
 
+    def selected_auto_connect(self) -> bool:
+        return bool(self.auto_connect_combo.currentData())
+
     def selected_profile_name(self) -> str:
         return self.profile_name_edit.text().strip()
+
+    def deleted_profiles(self) -> list[str]:
+        return sorted(self.deleted_profile_names)
 
     def save_profile_enabled(self) -> bool:
         return self.save_profile_checkbox.isChecked()
@@ -1898,6 +1965,26 @@ class ConnectDialog(QDialog):
         self.profile_name_edit.setEnabled(enabled)
         self.save_password_checkbox.setEnabled(enabled and self.selected_auth_mode() == "credentials")
 
+    def delete_selected_profile(self) -> None:
+        selected = str(self.profile_combo.currentData() or "")
+        if not selected:
+            return
+        if QMessageBox.question(
+            self,
+            "Delete saved profile",
+            f"Delete saved profile '{selected}' and its stored password?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        self.deleted_profile_names.add(selected)
+        self.profiles = [profile for profile in self.profiles if profile.name != selected]
+
+        idx = self.profile_combo.currentIndex()
+        self.profile_combo.removeItem(idx)
+        self.profile_combo.setCurrentIndex(0)
+
 
 class OptionsDialog(QDialog):
     def __init__(self, auth_mode: str, auto_connect: bool, parent=None) -> None:
@@ -1947,6 +2034,8 @@ class OptionsDialog(QDialog):
 
 
 class SecurityAclEditor(QWidget):
+    changed = Signal()
+
     PERMISSIONS: list[tuple[str, int]] = [
         ("Full Control", 0x10000000),
         ("Read", 0x80000000),
@@ -1961,8 +2050,20 @@ class SecurityAclEditor(QWidget):
         ("Change Permissions", 0x00040000),
         ("Take Ownership", 0x00080000),
     ]
+    MAPPED_PERMISSION_MASK = 0
+    for _, _perm_mask in PERMISSIONS:
+        MAPPED_PERMISSION_MASK |= _perm_mask
+    FULL_CONTROL_INDEX = 0
+    FULL_CONTROL_BIT = PERMISSIONS[FULL_CONTROL_INDEX][1]
+    FULL_CONTROL_EXPANDED_MASK = 0
+    for _idx, (_perm_name, _perm_mask) in enumerate(PERMISSIONS):
+        if _idx == FULL_CONTROL_INDEX:
+            continue
+        FULL_CONTROL_EXPANDED_MASK |= _perm_mask
+    # Common AD "Full Control" persisted mask for directory objects.
+    FULL_CONTROL_AD_MASK = 0x000F01FF
 
-    def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None) -> None:
+    def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None, show_apply_button: bool = True) -> None:
         super().__init__(parent)
         self.ldap = ldap
         self.object_dn = object_dn
@@ -2011,7 +2112,8 @@ class SecurityAclEditor(QWidget):
         self.meta_label = QLabel("")
         self.advanced_btn = QPushButton("Advanced")
         self.advanced_btn.setEnabled(False)
-        self.apply_btn = QPushButton("Apply Security")
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setVisible(show_apply_button)
         bottom_row.addWidget(self.meta_label, 1)
         bottom_row.addWidget(self.advanced_btn)
         bottom_row.addWidget(self.apply_btn)
@@ -2019,7 +2121,7 @@ class SecurityAclEditor(QWidget):
 
         self.add_btn.clicked.connect(self.add_principal)
         self.remove_btn.clicked.connect(self.remove_selected_principal)
-        self.principal_list.itemSelectionChanged.connect(self.on_principal_changed)
+        self.principal_list.currentItemChanged.connect(self.on_principal_changed)
         self.permissions_table.itemChanged.connect(self.on_permission_item_changed)
         self.apply_btn.clicked.connect(self.apply_security_changes)
 
@@ -2027,7 +2129,8 @@ class SecurityAclEditor(QWidget):
         self.reload_from_directory()
 
     def _build_permission_rows(self) -> None:
-        self.permissions_table.setRowCount(len(self.PERMISSIONS))
+        self.special_row_index = len(self.PERMISSIONS)
+        self.permissions_table.setRowCount(len(self.PERMISSIONS) + 1)
         for row, (perm_name, _mask) in enumerate(self.PERMISSIONS):
             perm_item = QTableWidgetItem(perm_name)
             perm_item.setFlags(Qt.ItemIsEnabled)
@@ -2038,7 +2141,17 @@ class SecurityAclEditor(QWidget):
                 box.setCheckState(Qt.Unchecked)
                 self.permissions_table.setItem(row, col, box)
 
-    def reload_from_directory(self) -> None:
+        special_item = QTableWidgetItem("Special (unmapped)")
+        special_item.setFlags(Qt.ItemIsEnabled)
+        self.permissions_table.setItem(self.special_row_index, 0, special_item)
+        for col in [1, 2]:
+            box = QTableWidgetItem("")
+            box.setFlags(Qt.ItemIsEnabled)
+            box.setCheckState(Qt.Unchecked)
+            self.permissions_table.setItem(self.special_row_index, col, box)
+        self.permissions_table.setRowHidden(self.special_row_index, True)
+
+    def reload_from_directory(self, select_sid: str = "") -> None:
         details = self.ldap.get_security_descriptor_details(self.object_dn)
         if details.get("error"):
             self.meta_label.setText(f"Unable to read security descriptor: {details.get('error')}")
@@ -2072,13 +2185,28 @@ class SecurityAclEditor(QWidget):
             self.principal_list.addItem(item)
 
         if self.principal_list.count() > 0:
-            self.principal_list.setCurrentRow(0)
-        self.meta_label.setText(f"Owner: {self.owner_sid}   Group: {self.group_sid}")
+            target_sid = select_sid.strip()
+            if target_sid and target_sid in self.principals:
+                for row in range(self.principal_list.count()):
+                    item = self.principal_list.item(row)
+                    if item and str(item.data(Qt.UserRole)) == target_sid:
+                        self.principal_list.setCurrentRow(row)
+                        break
+                else:
+                    self.principal_list.setCurrentRow(0)
+            else:
+                self.principal_list.setCurrentRow(0)
+        self.meta_label.setText("")
+        self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
 
     def resolve_sid_label(self, sid: str) -> str:
         cached = self.display_by_sid.get(sid)
         if cached:
             return cached
+
+        if sid in WELL_KNOWN_SID_LABELS:
+            self.display_by_sid[sid] = WELL_KNOWN_SID_LABELS[sid]
+            return WELL_KNOWN_SID_LABELS[sid]
 
         display_name = ""
         sam_name = ""
@@ -2114,10 +2242,19 @@ class SecurityAclEditor(QWidget):
 
         if not display_name and sam_name:
             display_name = sam_name
+        if sam_name and netbios_hint:
+            qualifier = f"{netbios_hint}\\{sam_name}"
+        elif sam_name:
+            qualifier = sam_name
+        else:
+            qualifier = ""
+
+        if not display_name and qualifier:
+            display_name = qualifier
+
         if not display_name:
             rendered = sid
-        elif sam_name:
-            qualifier = f"{netbios_hint}\\{sam_name}" if netbios_hint else sam_name
+        elif qualifier and display_name != qualifier:
             rendered = f"{display_name} ({qualifier})"
         else:
             rendered = display_name
@@ -2125,40 +2262,91 @@ class SecurityAclEditor(QWidget):
         self.display_by_sid[sid] = rendered
         return rendered
 
-    def on_principal_changed(self) -> None:
-        item = self.principal_list.currentItem()
-        self.remove_btn.setEnabled(item is not None)
-        if item is None:
+    def on_principal_changed(self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]) -> None:
+        if previous is not None and not self._loading_permissions:
+            previous_sid = str(previous.data(Qt.UserRole))
+            self._capture_permission_checkboxes_for_sid(previous_sid)
+
+        self.remove_btn.setEnabled(current is not None)
+        if current is None:
             self.permissions_label.setText("Permissions")
             self._loading_permissions = True
             for row in range(self.permissions_table.rowCount()):
                 self.permissions_table.item(row, 1).setCheckState(Qt.Unchecked)
                 self.permissions_table.item(row, 2).setCheckState(Qt.Unchecked)
+            self.permissions_table.setRowHidden(self.special_row_index, True)
             self._loading_permissions = False
             return
 
-        sid = str(item.data(Qt.UserRole))
+        sid = str(current.data(Qt.UserRole))
         data = self.principals.get(sid, {"allow": 0, "deny": 0})
-        self.permissions_label.setText(f"Permissions for {item.text().split(' (')[0]}")
+        self.permissions_label.setText(f"Permissions for {current.text().split(' (')[0]}")
         allow_mask = int(data.get("allow", 0))
         deny_mask = int(data.get("deny", 0))
+        allow_unmapped = allow_mask & ~self.MAPPED_PERMISSION_MASK
+        deny_unmapped = deny_mask & ~self.MAPPED_PERMISSION_MASK
+        allow_full_control = bool(
+            (allow_mask & self.FULL_CONTROL_BIT)
+            or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+            or ((allow_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+        )
+        deny_full_control = bool(
+            (deny_mask & self.FULL_CONTROL_BIT)
+            or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+            or ((deny_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+        )
         self._loading_permissions = True
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            if row == self.FULL_CONTROL_INDEX:
+                self.permissions_table.item(row, 1).setCheckState(Qt.Checked if allow_full_control else Qt.Unchecked)
+                self.permissions_table.item(row, 2).setCheckState(Qt.Checked if deny_full_control else Qt.Unchecked)
+                continue
             self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
             self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
+        has_unmapped = bool(allow_unmapped or deny_unmapped)
+        self.permissions_table.setRowHidden(self.special_row_index, not has_unmapped)
+        self.permissions_table.item(self.special_row_index, 1).setCheckState(Qt.Checked if allow_unmapped else Qt.Unchecked)
+        self.permissions_table.item(self.special_row_index, 2).setCheckState(Qt.Checked if deny_unmapped else Qt.Unchecked)
         self._loading_permissions = False
 
-    def on_permission_item_changed(self, _item: QTableWidgetItem) -> None:
+    def on_permission_item_changed(self, item: QTableWidgetItem) -> None:
         if self._loading_permissions:
             return
+
+        row = item.row()
+        col = item.column()
+        if col in (1, 2):
+            self._loading_permissions = True
+            try:
+                if row == self.FULL_CONTROL_INDEX:
+                    state = item.checkState()
+                    for perm_row in range(len(self.PERMISSIONS)):
+                        perm_item = self.permissions_table.item(perm_row, col)
+                        if perm_item is not None:
+                            perm_item.setCheckState(state)
+                else:
+                    all_checked = True
+                    for perm_row in range(1, len(self.PERMISSIONS)):
+                        perm_item = self.permissions_table.item(perm_row, col)
+                        if perm_item is None or perm_item.checkState() != Qt.Checked:
+                            all_checked = False
+                            break
+                    full_control_item = self.permissions_table.item(self.FULL_CONTROL_INDEX, col)
+                    if full_control_item is not None:
+                        full_control_item.setCheckState(Qt.Checked if all_checked else Qt.Unchecked)
+            finally:
+                self._loading_permissions = False
+
         self._capture_permission_checkboxes()
+        self.changed.emit()
 
     def add_principal(self) -> None:
+        principal_search_base = self.ldap.get_default_naming_context() or self.search_base
         dlg = SelectDirectoryObjectsDialog(
             self.ldap,
-            self.search_base,
+            principal_search_base,
             self,
-            search_options=[("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS)],
+            search_options=[("Users and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS)],
         )
         if dlg.exec() != QDialog.Accepted:
             return
@@ -2176,6 +2364,7 @@ class SecurityAclEditor(QWidget):
             self.principals[sid] = {"allow": 0, "deny": 0}
         self.display_by_sid[sid] = f"{display} ({sid})"
         self.refresh_principal_list(select_sid=sid)
+        self.changed.emit()
 
     def remove_selected_principal(self) -> None:
         item = self.principal_list.currentItem()
@@ -2185,6 +2374,7 @@ class SecurityAclEditor(QWidget):
         if sid in self.principals:
             del self.principals[sid]
         self.refresh_principal_list()
+        self.changed.emit()
 
     def refresh_principal_list(self, select_sid: str = "") -> None:
         self.principal_list.clear()
@@ -2209,12 +2399,13 @@ class SecurityAclEditor(QWidget):
             allow_mask = int(data.get("allow", 0))
             deny_mask = int(data.get("deny", 0))
 
+            ace_flags = CREATOR_INHERIT_ACE_FLAGS if sid in CREATOR_SIDS else 0x00
             if deny_mask:
                 ace_size = 8 + len(sid_bytes)
-                ace_payloads.append(bytes([0x01, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", deny_mask) + sid_bytes)
+                ace_payloads.append(bytes([0x01, ace_flags]) + struct.pack("<H", ace_size) + struct.pack("<I", deny_mask) + sid_bytes)
             if allow_mask:
                 ace_size = 8 + len(sid_bytes)
-                ace_payloads.append(bytes([0x00, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", allow_mask) + sid_bytes)
+                ace_payloads.append(bytes([0x00, ace_flags]) + struct.pack("<H", ace_size) + struct.pack("<I", allow_mask) + sid_bytes)
 
         acl_size = 8 + sum(len(ace) for ace in ace_payloads)
         header = struct.pack("<BBHHH", 0x02, 0x00, acl_size, len(ace_payloads), 0x0000)
@@ -2241,30 +2432,64 @@ class SecurityAclEditor(QWidget):
         if not item:
             return
         sid = str(item.data(Qt.UserRole))
+        self._capture_permission_checkboxes_for_sid(sid)
+
+    def _capture_permission_checkboxes_for_sid(self, sid: str) -> None:
         allow_mask = 0
         deny_mask = 0
+        allow_full_control_checked = self.permissions_table.item(self.FULL_CONTROL_INDEX, 1).checkState() == Qt.Checked
+        deny_full_control_checked = self.permissions_table.item(self.FULL_CONTROL_INDEX, 2).checkState() == Qt.Checked
+
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            if row == self.FULL_CONTROL_INDEX:
+                continue
             if self.permissions_table.item(row, 1).checkState() == Qt.Checked:
                 allow_mask |= bit
             if self.permissions_table.item(row, 2).checkState() == Qt.Checked:
                 deny_mask |= bit
-        self.principals[sid] = {"allow": allow_mask, "deny": deny_mask}
 
-    def apply_security_changes(self) -> None:
+        if allow_full_control_checked:
+            allow_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK | self.FULL_CONTROL_AD_MASK
+        if deny_full_control_checked:
+            deny_mask |= self.FULL_CONTROL_BIT | self.FULL_CONTROL_EXPANDED_MASK | self.FULL_CONTROL_AD_MASK
+
+        existing = self.principals.get(sid, {"allow": 0, "deny": 0})
+        allow_unmapped = int(existing.get("allow", 0)) & ~self.MAPPED_PERMISSION_MASK
+        deny_unmapped = int(existing.get("deny", 0)) & ~self.MAPPED_PERMISSION_MASK
+        self.principals[sid] = {
+            "allow": allow_mask | allow_unmapped,
+            "deny": deny_mask | deny_unmapped,
+        }
+
+    def has_pending_changes(self) -> bool:
         self._capture_permission_checkboxes()
+        if not hasattr(self, "_original_principals"):
+            return False
+        return self.principals != self._original_principals
+
+    def apply_security_changes(self, reload_after_save: bool = True) -> bool:
+        self._capture_permission_checkboxes()
+        current_item = self.principal_list.currentItem()
+        selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
+
         try:
-            sd = self._build_security_descriptor()
-            self.ldap.set_security_descriptor(self.object_dn, sd)
+            with busy_cursor():
+                sd = self._build_security_descriptor()
+                self.ldap.set_security_descriptor(self.object_dn, sd)
+                if reload_after_save:
+                    self.reload_from_directory(select_sid=selected_sid)
         except Exception as e:
             QMessageBox.critical(self, "Apply security failed", str(e))
-            return
+            return False
 
-        QMessageBox.information(self, "Security", "Security permissions were updated.")
-        self.reload_from_directory()
+        if not reload_after_save:
+            self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
+            self.changed.emit()
+        return True
 
 
-def build_acl_viewer_tab(ldap: LdapManager, object_dn: str, search_base: str) -> QWidget:
-    return SecurityAclEditor(ldap, object_dn, search_base)
+def build_acl_viewer_tab(ldap: LdapManager, object_dn: str, search_base: str, show_apply_button: bool = True) -> QWidget:
+    return SecurityAclEditor(ldap, object_dn, search_base, show_apply_button=show_apply_button)
 
 
 class PropertiesDialog(QDialog):
@@ -2385,7 +2610,9 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
         tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
-        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
+        self.security_editor = build_acl_viewer_tab(self.ldap, obj.dn, self.search_base, show_apply_button=False)
+        self.security_editor.changed.connect(self.refresh_apply_button_state)
+        tabs.addTab(self.security_editor, "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -2989,6 +3216,9 @@ class ComputerPropertiesDialog(QDialog):
             if self._delegation_services_from_table() != self.original_delegation_services:
                 return True
 
+        if self.security_editor.has_pending_changes():
+            return True
+
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -3048,13 +3278,19 @@ class ComputerPropertiesDialog(QDialog):
 
     def apply_changes(self) -> bool:
         try:
-            self.apply_member_of_changes()
-            self.apply_attribute_changes()
-            self.apply_delegation_changes()
+            with busy_cursor():
+                self.apply_member_of_changes()
+                self.apply_attribute_changes()
+                self.apply_delegation_changes()
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return False
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
 
+        current_item = self.security_editor.principal_list.currentItem()
+        selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
+        self.security_editor.reload_from_directory(select_sid=selected_sid)
         self.refresh_apply_button_state()
         return True
 
@@ -3122,7 +3358,9 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
         tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
-        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
+        self.security_editor = build_acl_viewer_tab(self.ldap, obj.dn, self.search_base, show_apply_button=False)
+        self.security_editor.changed.connect(self.refresh_apply_button_state)
+        tabs.addTab(self.security_editor, "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3367,6 +3605,9 @@ class UserPropertiesDialog(QDialog):
             if current_values != original_values:
                 return True
 
+        if self.security_editor.has_pending_changes():
+            return True
+
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -3417,18 +3658,30 @@ class UserPropertiesDialog(QDialog):
 
     def apply_changes(self) -> None:
         try:
-            self.apply_account_changes()
-            self.apply_member_of_changes()
-            self.apply_attribute_changes()
+            with busy_cursor():
+                self.apply_account_changes()
+                self.apply_member_of_changes()
+                self.apply_attribute_changes()
+                current_item = self.security_editor.principal_list.currentItem()
+                selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return
+                self.security_editor.reload_from_directory(select_sid=selected_sid)
             self.refresh_apply_button_state()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
 
     def on_ok(self) -> None:
         try:
-            self.apply_account_changes()
-            self.apply_member_of_changes()
-            self.apply_attribute_changes()
+            with busy_cursor():
+                self.apply_account_changes()
+                self.apply_member_of_changes()
+                self.apply_attribute_changes()
+                current_item = self.security_editor.principal_list.currentItem()
+                selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return
+                self.security_editor.reload_from_directory(select_sid=selected_sid)
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return
@@ -3750,9 +4003,7 @@ class SelectDirectoryObjectsDialog(QDialog):
         layout.addWidget(buttons)
 
     def run_search(self, *_args) -> None:
-        term = self.search_edit.text().strip()
-        if not term:
-            return
+        term = self.search_edit.text().strip() or "*"
 
         try:
             results = self.ldap.search_directory_objects(
@@ -3870,7 +4121,9 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
 
-        tabs.addTab(build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base), "Security")
+        self.security_editor = build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base, show_apply_button=False)
+        self.security_editor.changed.connect(self.refresh_apply_button_state)
+        tabs.addTab(self.security_editor, "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3985,6 +4238,8 @@ class GroupPropertiesDialog(QDialog):
             return True
         if self.current_member_dns() != self.original_member_dns:
             return True
+        if self.security_editor.has_pending_changes():
+            return True
         return False
 
     def refresh_apply_button_state(self) -> None:
@@ -3999,25 +4254,32 @@ class GroupPropertiesDialog(QDialog):
         managed_by = self.managed_by_edit.text().strip()
 
         try:
-            if sam_name != self.original_sam_name:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "sAMAccountName", [sam_name] if sam_name else [])
-                self.original_sam_name = sam_name
+            with busy_cursor():
+                if sam_name != self.original_sam_name:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "sAMAccountName", [sam_name] if sam_name else [])
+                    self.original_sam_name = sam_name
 
-            if description != self.original_description:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "description", [description] if description else [])
-                self.original_description = description
+                if description != self.original_description:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "description", [description] if description else [])
+                    self.original_description = description
 
-            if email != self.original_email:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "mail", [email] if email else [])
-                self.original_email = email
+                if email != self.original_email:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "mail", [email] if email else [])
+                    self.original_email = email
 
-            if managed_by != self.original_managed_by:
-                self.ldap.replace_object_attribute_values(self.group_obj.dn, "managedBy", [managed_by] if managed_by else [])
-                self.original_managed_by = managed_by
+                if managed_by != self.original_managed_by:
+                    self.ldap.replace_object_attribute_values(self.group_obj.dn, "managedBy", [managed_by] if managed_by else [])
+                    self.original_managed_by = managed_by
 
-            if member_dns != self.original_member_dns:
-                self.ldap.replace_group_members(self.group_obj.dn, member_dns)
-                self.original_member_dns = member_dns
+                if member_dns != self.original_member_dns:
+                    self.ldap.replace_group_members(self.group_obj.dn, member_dns)
+                    self.original_member_dns = member_dns
+
+                current_item = self.security_editor.principal_list.currentItem()
+                selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
+                if not self.security_editor.apply_security_changes(reload_after_save=False):
+                    return False
+                self.security_editor.reload_from_directory(select_sid=selected_sid)
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
@@ -4533,10 +4795,6 @@ class MainWindow(QMainWindow):
         refresh_action.triggered.connect(self.refresh_current)
         file_menu.addAction(refresh_action)
 
-        options_action = QAction("Options", self)
-        options_action.triggered.connect(self.show_options_dialog)
-        file_menu.addAction(options_action)
-
         file_menu.addSeparator()
 
         exit_action = QAction("Exit", self)
@@ -4855,6 +5113,18 @@ class MainWindow(QMainWindow):
                 return profile
         return None
 
+    def delete_connection_profiles(self, profile_names: list[str]) -> None:
+        targets = {name.strip() for name in profile_names if name.strip()}
+        if not targets:
+            return
+
+        self.connection_profiles = [profile for profile in self.connection_profiles if profile.name not in targets]
+        for name in targets:
+            CredentialStore.delete_password(name)
+
+        if self.active_profile_name in targets:
+            self.active_profile_name = ""
+
     def apply_saved_main_table_widths(self) -> None:
         if not self.main_table_column_widths:
             return
@@ -4911,15 +5181,6 @@ class MainWindow(QMainWindow):
             self.show_error("Auto-connect failed", str(e))
             return
 
-    def show_options_dialog(self) -> None:
-        dlg = OptionsDialog(self.auth_mode, self.auto_connect, self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        self.auth_mode = dlg.selected_auth_mode()
-        self.auto_connect = dlg.selected_auto_connect()
-        self.save_settings()
-
     def show_connect_dialog(self) -> None:
         dlg = ConnectDialog(
             self.auth_mode,
@@ -4927,13 +5188,21 @@ class MainWindow(QMainWindow):
             self.saved_port,
             profiles=self.connection_profiles,
             selected_profile=self.active_profile_name,
+            auto_connect=self.auto_connect,
             parent=self,
         )
-        if dlg.exec() != QDialog.Accepted:
+        result = dlg.exec()
+        deleted_profiles = dlg.deleted_profiles()
+        if deleted_profiles:
+            self.delete_connection_profiles(deleted_profiles)
+            self.save_settings()
+
+        if result != QDialog.Accepted:
             return
 
         host, port, bind_user, password = dlg.values()
         self.auth_mode = dlg.selected_auth_mode()
+        self.auto_connect = dlg.selected_auto_connect()
 
         try:
             if self.auth_mode == "kerberos":
@@ -5188,27 +5457,31 @@ class MainWindow(QMainWindow):
         self.update_status_bar()
 
     def open_properties(self, obj: LdapObject) -> None:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             attrs = self.ldap.get_object_attributes(obj.dn)
+
+            search_base = self.current_dn
+            if not search_base:
+                top = self.tree.topLevelItem(0)
+                if top:
+                    data = top.data(0, Qt.UserRole) or {}
+                    search_base = data.get("dn")
+
+            if obj.object_type == "Group" and search_base:
+                dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+            elif obj.object_type == "User":
+                dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+            elif obj.object_type == "Computer" and search_base:
+                dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+            else:
+                dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         except Exception as e:
             self.show_error("Read failed", str(e))
             return
+        finally:
+            QApplication.restoreOverrideCursor()
 
-        search_base = self.current_dn
-        if not search_base:
-            top = self.tree.topLevelItem(0)
-            if top:
-                data = top.data(0, Qt.UserRole) or {}
-                search_base = data.get("dn")
-
-        if obj.object_type == "Group" and search_base:
-            dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
-        elif obj.object_type == "User":
-            dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
-        elif obj.object_type == "Computer" and search_base:
-            dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
-        else:
-            dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         dlg.exec()
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
@@ -5827,6 +6100,37 @@ class MainWindow(QMainWindow):
     def on_table_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
         if not item:
+            if not self.current_dn:
+                return
+            menu = QMenu(self)
+            _, create_actions = self.add_new_submenu(menu, self.current_dn)
+            create_user_action = create_actions.get("user")
+            create_group_action = create_actions.get("group")
+            create_computer_action = create_actions.get("computer")
+            create_ou_action = create_actions.get("organizational_unit")
+            menu.addSeparator()
+            refresh_action = menu.addAction("Refresh")
+            chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if not chosen:
+                return
+            if create_user_action is not None and chosen == create_user_action:
+                self.create_user_under_dn(self.current_dn)
+            elif create_group_action is not None and chosen == create_group_action:
+                self.create_group_under_dn(self.current_dn)
+            elif create_computer_action is not None and chosen == create_computer_action:
+                self.create_computer_under_dn(self.current_dn)
+            elif create_ou_action is not None and chosen == create_ou_action:
+                name, ok = QInputDialog.getText(self, "New Organizational Unit", "Name:")
+                name = name.strip()
+                if ok and name:
+                    try:
+                        self.ldap.create_organizational_unit(self.current_dn, name)
+                    except Exception as e:
+                        self.show_error("Create OU failed", str(e))
+                        return
+                    self.refresh_current()
+            elif chosen == refresh_action:
+                self.refresh_current()
             return
 
         row = item.row()

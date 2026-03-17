@@ -53,6 +53,13 @@ It is intentionally small and focused: one Python app, one installer script, and
 
 Python dependencies are listed in `requirements.txt` and installed into a virtual environment by the installer.
 
+### Kerberos note for Samba AD
+
+Some Samba AD environments enforce LDAP strong-auth requirements that mandate SASL GSSAPI sign/seal.
+Depending on the `ldap3`/Kerberos stack available in the app runtime, Kerberos bind may fail in those environments even while it works against Microsoft AD.
+
+If that happens, switch to **Credentials** authentication mode in ADUC for Linux; simple bind over LDAPS will still work in typical Samba AD setups.
+
 ## Installation
 
 ### Debian package (recommended)
