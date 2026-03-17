@@ -118,16 +118,15 @@ For normal use, prefer running through the installed virtual environment (launch
 
 ## Configuration
 
-On initial launch, you will need to first connect to a domain controller via **_File > Connect_**. If you are working from a domain-joined machine, you may optionally enable `Kerberos / SSO` for the connection's authentication mechanism. You may save multiple profiles for different account/connection settings, as well as optionally store credentials securely to your system's keyring.
+On initial launch, you will need to first connect to a domain controller via **_File > Connect_**. If you are working from a domain-joined machine, you may optionally enable `Kerberos / SSO` for the connection's authentication mechanism. Otherwise, select `Credentials` to authenticate using explicity login credentials.
 
-Preferences are stored to your local profile in:
+Multiple profiles may be created for different account/connection, as well as optionally store credentials securely to your system's keyring. When using stored credentials or `Kerberos / SSO` authentication, you may optionally choose to auto-connect on application launch. These preferences are stored to your local profile in:
 
 - `~/.config/aduc-linux/settings.json`
 
 ### Kerberos note for Samba AD
 
-Some Samba AD environments enforce LDAP strong-auth requirements that mandate SASL GSSAPI sign/seal.
-Depending on the `ldap3`/Kerberos stack available in the app runtime, Kerberos bind may fail in those environments even while it works against Microsoft AD.
+Some Samba AD environments enforce LDAP strong-auth requirements that mandate SASL GSSAPI sign/seal. Depending on the `ldap3`/Kerberos stack available in the app runtime, Kerberos bind may fail in those environments even while it works against Microsoft AD.
 
 If that happens, switch to **Credentials** authentication mode in ADUC for Linux; simple bind over LDAPS will still work in typical Samba AD setups.
 
@@ -136,9 +135,8 @@ If that happens, switch to **Credentials** authentication mode in ADUC for Linux
 Potential next improvements:
 
 - Expand object management actions and dialogs.
-- Add configurable connection profiles.
 - Add automated tests beyond syntax validation.
-- Improve packaging options (native packages/AppImage/Flatpak).
+- Expand packaging options (AppImage/Flatpak/RPM).
 
 ## Donate
 
