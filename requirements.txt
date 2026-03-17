@@ -1,2 +1,3 @@
 PySide6
 ldap3
+keyring
