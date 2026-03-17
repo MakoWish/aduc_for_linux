@@ -2093,7 +2093,7 @@ class SecurityAclEditor(QWidget):
             self.permissions_table.setItem(self.special_row_index, col, box)
         self.permissions_table.setRowHidden(self.special_row_index, True)
 
-    def reload_from_directory(self) -> None:
+    def reload_from_directory(self, select_sid: str = "") -> None:
         details = self.ldap.get_security_descriptor_details(self.object_dn)
         if details.get("error"):
             self.meta_label.setText(f"Unable to read security descriptor: {details.get('error')}")
@@ -2127,7 +2127,17 @@ class SecurityAclEditor(QWidget):
             self.principal_list.addItem(item)
 
         if self.principal_list.count() > 0:
-            self.principal_list.setCurrentRow(0)
+            target_sid = select_sid.strip()
+            if target_sid and target_sid in self.principals:
+                for row in range(self.principal_list.count()):
+                    item = self.principal_list.item(row)
+                    if item and str(item.data(Qt.UserRole)) == target_sid:
+                        self.principal_list.setCurrentRow(row)
+                        break
+                else:
+                    self.principal_list.setCurrentRow(0)
+            else:
+                self.principal_list.setCurrentRow(0)
         self.meta_label.setText("")
         self._original_principals = {sid: {"allow": int(v.get("allow", 0)), "deny": int(v.get("deny", 0))} for sid, v in self.principals.items()}
 
@@ -2401,13 +2411,15 @@ class SecurityAclEditor(QWidget):
 
     def apply_security_changes(self, reload_after_save: bool = True) -> bool:
         self._capture_permission_checkboxes()
+        current_item = self.principal_list.currentItem()
+        selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
 
         try:
             with busy_cursor():
                 sd = self._build_security_descriptor()
                 self.ldap.set_security_descriptor(self.object_dn, sd)
                 if reload_after_save:
-                    self.reload_from_directory()
+                    self.reload_from_directory(select_sid=selected_sid)
         except Exception as e:
             QMessageBox.critical(self, "Apply security failed", str(e))
             return False
@@ -3218,7 +3230,9 @@ class ComputerPropertiesDialog(QDialog):
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
 
-        self.security_editor.reload_from_directory()
+        current_item = self.security_editor.principal_list.currentItem()
+        selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
+        self.security_editor.reload_from_directory(select_sid=selected_sid)
         self.refresh_apply_button_state()
         return True
 
@@ -3590,9 +3604,11 @@ class UserPropertiesDialog(QDialog):
                 self.apply_account_changes()
                 self.apply_member_of_changes()
                 self.apply_attribute_changes()
+                current_item = self.security_editor.principal_list.currentItem()
+                selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
                 if not self.security_editor.apply_security_changes(reload_after_save=False):
                     return
-            self.security_editor.reload_from_directory()
+                self.security_editor.reload_from_directory(select_sid=selected_sid)
             self.refresh_apply_button_state()
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
@@ -3603,9 +3619,11 @@ class UserPropertiesDialog(QDialog):
                 self.apply_account_changes()
                 self.apply_member_of_changes()
                 self.apply_attribute_changes()
+                current_item = self.security_editor.principal_list.currentItem()
+                selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
                 if not self.security_editor.apply_security_changes(reload_after_save=False):
                     return
-            self.security_editor.reload_from_directory()
+                self.security_editor.reload_from_directory(select_sid=selected_sid)
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return
@@ -4198,9 +4216,12 @@ class GroupPropertiesDialog(QDialog):
                 if member_dns != self.original_member_dns:
                     self.ldap.replace_group_members(self.group_obj.dn, member_dns)
                     self.original_member_dns = member_dns
+
+                current_item = self.security_editor.principal_list.currentItem()
+                selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
                 if not self.security_editor.apply_security_changes(reload_after_save=False):
                     return False
-            self.security_editor.reload_from_directory()
+                self.security_editor.reload_from_directory(select_sid=selected_sid)
         except Exception as e:
             QMessageBox.critical(self, "Apply failed", str(e))
             return False
