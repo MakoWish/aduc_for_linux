@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import csv
+import base64
 import json
 import os
 import ssl
+import struct
 import sys
 import urllib.error
 import urllib.request
@@ -57,6 +59,11 @@ from PySide6.QtWidgets import (
 
 from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, Connection, Server, Tls
 
+try:
+    import keyring
+except Exception:
+    keyring = None
+
 
 # Hard-coded values used only during development
 TEST_DC = ""
@@ -100,6 +107,194 @@ SEARCH_FILTER_OPTIONS = [
     ("Computers", SEARCH_FILTER_COMPUTERS),
     ("Organizational Units", SEARCH_FILTER_ORGANIZATIONAL_UNITS),
 ]
+
+KEYRING_SERVICE_NAME = "aduc-for-linux"
+
+
+
+@dataclass
+class ConnectionProfile:
+    name: str
+    host: str
+    port: int
+    auth_mode: str
+    bind_user: str
+    store_password: bool = False
+
+
+class CredentialStore:
+    @staticmethod
+    def available() -> bool:
+        return keyring is not None
+
+    @staticmethod
+    def _secret_name(profile_name: str) -> str:
+        return f"profile:{profile_name}"
+
+    @classmethod
+    def get_password(cls, profile_name: str) -> str:
+        if keyring is None:
+            return ""
+        try:
+            value = keyring.get_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name))
+            return value or ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def set_password(cls, profile_name: str, password: str) -> bool:
+        if keyring is None:
+            return False
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name), password)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def delete_password(cls, profile_name: str) -> None:
+        if keyring is None:
+            return
+        try:
+            keyring.delete_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name))
+        except Exception:
+            pass
+
+
+def parse_sid(sid_bytes: bytes) -> str:
+    if len(sid_bytes) < 8:
+        return "<invalid SID>"
+    revision = sid_bytes[0]
+    sub_count = sid_bytes[1]
+    needed = 8 + (4 * sub_count)
+    if len(sid_bytes) < needed:
+        return "<invalid SID>"
+    identifier_authority = int.from_bytes(sid_bytes[2:8], byteorder="big", signed=False)
+    subs = [struct.unpack("<I", sid_bytes[8 + 4 * i: 12 + 4 * i])[0] for i in range(sub_count)]
+    return f"S-{revision}-{identifier_authority}" + "".join(f"-{value}" for value in subs)
+
+
+def sid_to_bytes(sid: str) -> bytes:
+    parts = sid.strip().split("-")
+    if len(parts) < 3 or parts[0].upper() != "S":
+        raise ValueError(f"Invalid SID: {sid}")
+
+    revision = int(parts[1])
+    identifier_authority = int(parts[2])
+    sub_authorities = [int(x) for x in parts[3:]]
+
+    if revision < 0 or revision > 255:
+        raise ValueError(f"Invalid SID revision: {revision}")
+    if identifier_authority < 0 or identifier_authority > 0xFFFFFFFFFFFF:
+        raise ValueError(f"Invalid SID identifier authority: {identifier_authority}")
+    if len(sub_authorities) > 255:
+        raise ValueError("SID has too many sub-authorities")
+
+    head = bytes([revision, len(sub_authorities)]) + identifier_authority.to_bytes(6, byteorder="big", signed=False)
+    body = b"".join(struct.pack("<I", value) for value in sub_authorities)
+    return head + body
+
+
+def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
+    out = {
+        "owner_sid": "",
+        "group_sid": "",
+        "dacl": [],
+        "error": "",
+    }
+    if len(sd_bytes) < 20:
+        out["error"] = "Descriptor is shorter than SECURITY_DESCRIPTOR header."
+        return out
+
+    try:
+        revision, _sbz1, control, owner_off, group_off, _sacl_off, dacl_off = struct.unpack("<BBHLLLL", sd_bytes[:20])
+    except struct.error:
+        out["error"] = "Unable to parse SECURITY_DESCRIPTOR header."
+        return out
+
+    if revision != 1:
+        out["error"] = f"Unexpected security descriptor revision: {revision}"
+
+    out["control"] = int(control)
+
+    def _read_sid(offset: int) -> str:
+        if offset <= 0 or offset >= len(sd_bytes):
+            return ""
+        sub_count = sd_bytes[offset + 1] if offset + 1 < len(sd_bytes) else 0
+        sid_size = 8 + (4 * sub_count)
+        if offset + sid_size > len(sd_bytes):
+            return "<invalid SID>"
+        return parse_sid(sd_bytes[offset: offset + sid_size])
+
+    out["owner_sid"] = _read_sid(owner_off)
+    out["group_sid"] = _read_sid(group_off)
+
+    if dacl_off <= 0 or dacl_off + 8 > len(sd_bytes):
+        return out
+
+    ace_type_map = {
+        0x00: "ACCESS_ALLOWED",
+        0x01: "ACCESS_DENIED",
+        0x02: "SYSTEM_AUDIT",
+        0x03: "SYSTEM_ALARM",
+        0x05: "ACCESS_ALLOWED_OBJECT",
+        0x06: "ACCESS_DENIED_OBJECT",
+    }
+
+    dacl_data = sd_bytes[dacl_off:]
+    try:
+        _acl_rev, _acl_sbz1, acl_size, ace_count, _acl_sbz2 = struct.unpack("<BBHHH", dacl_data[:8])
+    except struct.error:
+        out["error"] = "Unable to parse DACL header."
+        return out
+
+    if acl_size > len(dacl_data):
+        acl_size = len(dacl_data)
+
+    cursor = 8
+    for _ in range(ace_count):
+        if cursor + 8 > acl_size:
+            break
+        ace_type = dacl_data[cursor]
+        ace_flags = dacl_data[cursor + 1]
+        ace_size = struct.unpack("<H", dacl_data[cursor + 2: cursor + 4])[0]
+        if ace_size <= 0 or cursor + ace_size > acl_size:
+            break
+
+        ace_bytes = dacl_data[cursor: cursor + ace_size]
+        mask = struct.unpack("<I", ace_bytes[4:8])[0] if len(ace_bytes) >= 8 else 0
+        sid = ""
+
+        sid_offset = 8
+        if ace_type in (0x05, 0x06) and len(ace_bytes) >= 12:
+            # ACCESS_ALLOWED_OBJECT_ACE / ACCESS_DENIED_OBJECT_ACE:
+            # ACE header (4) + mask (4) + flags (4) + optional GUIDs + SID.
+            object_flags = struct.unpack("<I", ace_bytes[8:12])[0]
+            sid_offset = 12
+            if object_flags & 0x1:
+                sid_offset += 16
+            if object_flags & 0x2:
+                sid_offset += 16
+
+        if len(ace_bytes) > sid_offset:
+            sid = parse_sid(ace_bytes[sid_offset:])
+
+        out["dacl"].append(
+            {
+                "type": ace_type_map.get(ace_type, f"ACE_{ace_type}"),
+                "ace_type": int(ace_type),
+                "flags": f"0x{ace_flags:02X}",
+                "ace_flags": int(ace_flags),
+                "mask": f"0x{mask:08X}",
+                "mask_value": int(mask),
+                "trustee_sid": sid,
+            }
+        )
+
+        cursor += ace_size
+
+    _ = control
+    return out
 
 
 def parse_version(version: str) -> tuple[int, ...]:
@@ -735,6 +930,109 @@ class LdapManager:
                 out[attr] = ["<unreadable>"]
 
         return dict(sorted(out.items(), key=lambda kv: kv[0].lower()))
+
+    def get_security_descriptor_details(self, dn: str) -> dict[str, Any]:
+        if not self.conn:
+            return {"error": "Not connected"}
+
+        controls = None
+        try:
+            from ldap3.protocol.microsoft import security_descriptor_control
+
+            controls = security_descriptor_control(sdflags=0x04)
+        except Exception:
+            controls = None
+
+        try:
+            self.conn.search(
+                search_base=dn,
+                search_filter="(objectClass=*)",
+                search_scope=BASE,
+                attributes=["nTSecurityDescriptor"],
+                controls=controls,
+            )
+        except Exception as e:
+            return {"error": str(e)}
+
+        if not self.conn.entries:
+            return {"error": "Object not found"}
+
+        entry = self.conn.entries[0]
+        raw_values = []
+        try:
+            if "nTSecurityDescriptor" in entry:
+                raw_values = entry["nTSecurityDescriptor"].raw_values
+        except Exception:
+            raw_values = []
+
+        if not raw_values:
+            return {"error": "nTSecurityDescriptor is unavailable for this object/connection."}
+
+        value = raw_values[0]
+        if not isinstance(value, (bytes, bytearray)):
+            return {"error": "nTSecurityDescriptor returned in an unexpected format."}
+
+        sd_bytes = bytes(value)
+        parsed = parse_relative_security_descriptor(sd_bytes)
+        parsed["base64"] = base64.b64encode(sd_bytes).decode("ascii")
+        parsed["length"] = len(sd_bytes)
+        parsed["raw_bytes"] = sd_bytes
+        return parsed
+
+    def set_security_descriptor(self, dn: str, sd_bytes: bytes) -> None:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        controls = None
+        try:
+            from ldap3.protocol.microsoft import security_descriptor_control
+
+            controls = security_descriptor_control(sdflags=0x04)
+        except Exception:
+            controls = None
+
+        ok = self.conn.modify(
+            dn,
+            {"nTSecurityDescriptor": [(MODIFY_REPLACE, [sd_bytes])]},
+            controls=controls,
+        )
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
+    def get_object_display_and_sid(self, dn: str) -> tuple[str, str]:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        self.conn.search(
+            search_base=dn,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["displayName", "cn", "name", "objectSid"],
+        )
+        if not self.conn.entries:
+            raise ValueError("Object not found")
+
+        entry = self.conn.entries[0]
+        display = dn
+        for attr in ["displayName", "cn", "name"]:
+            values = self._entry_attr_values(entry, attr)
+            if values:
+                display = values[0]
+                break
+
+        sid_values = []
+        try:
+            if "objectSid" in entry:
+                sid_values = entry["objectSid"].raw_values
+        except Exception:
+            sid_values = []
+        if not sid_values:
+            raise ValueError("Object SID unavailable")
+
+        sid_raw = sid_values[0]
+        if not isinstance(sid_raw, (bytes, bytearray)):
+            raise ValueError("Object SID is in an unexpected format")
+        return display, parse_sid(bytes(sid_raw))
 
     @staticmethod
     def _escape_search_term(term: str) -> str:
@@ -1453,10 +1751,39 @@ class LdapManager:
 
 
 class ConnectDialog(QDialog):
-    def __init__(self, auth_mode: str, saved_host: str = "", saved_port: int = 636, parent=None) -> None:
+    def __init__(
+        self,
+        auth_mode: str,
+        saved_host: str = "",
+        saved_port: int = 636,
+        profiles: Optional[list[ConnectionProfile]] = None,
+        selected_profile: str = "",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Connect to Active Directory")
         self.auth_mode = auth_mode
+        self.profiles = profiles or []
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItem("Manual (unsaved)", "")
+        for profile in self.profiles:
+            self.profile_combo.addItem(profile.name, profile.name)
+        if selected_profile:
+            index = self.profile_combo.findData(selected_profile)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+
+        self.auth_mode_combo = QComboBox()
+        self.auth_mode_combo.addItem("Credentials", "credentials")
+        self.auth_mode_combo.addItem("Kerberos / SSO", "kerberos")
+        idx = self.auth_mode_combo.findData(auth_mode)
+        if idx >= 0:
+            self.auth_mode_combo.setCurrentIndex(idx)
+
+        self.profile_name_edit = QLineEdit(selected_profile)
+        self.save_profile_checkbox = QCheckBox("Save/update this connection profile")
+        self.save_password_checkbox = QCheckBox("Save password in system keyring")
 
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("dc01.example.com")
@@ -1477,17 +1804,16 @@ class ConnectDialog(QDialog):
         if TEST_BIND_PASSWORD:
             self.password_edit.setText(TEST_BIND_PASSWORD)
 
-        if self.auth_mode == "kerberos":
-            self.bind_user_edit.setEnabled(False)
-            self.password_edit.setEnabled(False)
-            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
-            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
-
         form = QFormLayout()
+        form.addRow("Profile:", self.profile_combo)
+        form.addRow("Profile name:", self.profile_name_edit)
+        form.addRow("Authentication:", self.auth_mode_combo)
         form.addRow("Server:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Bind user:", self.bind_user_edit)
         form.addRow("Password:", self.password_edit)
+        form.addRow("", self.save_profile_checkbox)
+        form.addRow("", self.save_password_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -1496,6 +1822,13 @@ class ConnectDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+
+        self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
+        self.auth_mode_combo.currentIndexChanged.connect(self.update_auth_fields)
+        self.save_profile_checkbox.toggled.connect(self.update_profile_controls)
+        self.update_auth_fields()
+        self.update_profile_controls()
+        self.on_profile_selected()
 
         # Make the connect dialog wide enough for long title bars and field contents.
         hint = self.sizeHint()
@@ -1508,6 +1841,62 @@ class ConnectDialog(QDialog):
             self.bind_user_edit.text().strip(),
             self.password_edit.text(),
         )
+
+    def selected_auth_mode(self) -> str:
+        return str(self.auth_mode_combo.currentData())
+
+    def selected_profile_name(self) -> str:
+        return self.profile_name_edit.text().strip()
+
+    def save_profile_enabled(self) -> bool:
+        return self.save_profile_checkbox.isChecked()
+
+    def save_password_enabled(self) -> bool:
+        return self.save_password_checkbox.isChecked() and self.selected_auth_mode() == "credentials"
+
+    def on_profile_selected(self) -> None:
+        selected = str(self.profile_combo.currentData() or "")
+        if not selected:
+            self.save_profile_checkbox.setChecked(False)
+            self.save_password_checkbox.setChecked(False)
+            self.update_profile_controls()
+            return
+        for profile in self.profiles:
+            if profile.name != selected:
+                continue
+            self.profile_name_edit.setText(profile.name)
+            self.host_edit.setText(profile.host)
+            self.port_edit.setText(str(profile.port))
+            self.bind_user_edit.setText(profile.bind_user)
+            idx = self.auth_mode_combo.findData(profile.auth_mode)
+            if idx >= 0:
+                self.auth_mode_combo.setCurrentIndex(idx)
+            self.save_profile_checkbox.setChecked(True)
+            self.save_password_checkbox.setChecked(bool(profile.store_password))
+            if profile.auth_mode == "credentials":
+                if profile.store_password:
+                    self.password_edit.setText(CredentialStore.get_password(profile.name))
+                else:
+                    self.password_edit.clear()
+            self.update_profile_controls()
+            break
+
+    def update_auth_fields(self) -> None:
+        kerberos = self.selected_auth_mode() == "kerberos"
+        self.bind_user_edit.setEnabled(not kerberos)
+        self.password_edit.setEnabled(not kerberos)
+        self.save_password_checkbox.setEnabled(not kerberos and self.save_profile_checkbox.isChecked())
+        if kerberos:
+            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
+            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
+        else:
+            self.bind_user_edit.setPlaceholderText("admin@example.com or EXAMPLE\\admin")
+            self.password_edit.setPlaceholderText("")
+
+    def update_profile_controls(self) -> None:
+        enabled = self.save_profile_checkbox.isChecked()
+        self.profile_name_edit.setEnabled(enabled)
+        self.save_password_checkbox.setEnabled(enabled and self.selected_auth_mode() == "credentials")
 
 
 class OptionsDialog(QDialog):
@@ -1549,19 +1938,345 @@ class OptionsDialog(QDialog):
         return str(self.auth_mode_combo.currentData())
 
     def selected_auto_connect(self) -> bool:
-        if self.selected_auth_mode() == "credentials":
-            return False
         return bool(self.auto_connect_combo.currentData())
 
     def update_auto_connect_state(self) -> None:
-        using_credentials = self.selected_auth_mode() == "credentials"
-        if using_credentials:
-            self.auto_connect_combo.setCurrentIndex(0)
-        self.auto_connect_combo.setEnabled(not using_credentials)
+        # Auto-connect is supported for both credentials (when keyring credentials exist)
+        # and Kerberos profiles.
+        self.auto_connect_combo.setEnabled(True)
+
+
+class SecurityAclEditor(QWidget):
+    PERMISSIONS: list[tuple[str, int]] = [
+        ("Full Control", 0x10000000),
+        ("Read", 0x80000000),
+        ("Write", 0x40000000),
+        ("Create All Child Objects", 0x00000001),
+        ("Delete All Child Objects", 0x00000002),
+        ("List Contents", 0x00000004),
+        ("Read All Properties", 0x00000010),
+        ("Write All Properties", 0x00000020),
+        ("Delete", 0x00010000),
+        ("Read Permissions", 0x00020000),
+        ("Change Permissions", 0x00040000),
+        ("Take Ownership", 0x00080000),
+    ]
+
+    def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None) -> None:
+        super().__init__(parent)
+        self.ldap = ldap
+        self.object_dn = object_dn
+        self.search_base = search_base
+        self.owner_sid = ""
+        self.group_sid = ""
+        self.original_control = 0x8004
+        self.principals: dict[str, dict[str, Any]] = {}
+        self.display_by_sid: dict[str, str] = {}
+        self._loading_permissions = False
+
+        root = QVBoxLayout(self)
+
+        top_label = QLabel("Group or user names:")
+        root.addWidget(top_label)
+
+        top_row = QHBoxLayout()
+        self.principal_list = QListWidget()
+        self.principal_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        top_row.addWidget(self.principal_list, 1)
+
+        button_col = QVBoxLayout()
+        self.add_btn = QPushButton("Add...")
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.setEnabled(False)
+        button_col.addWidget(self.add_btn)
+        button_col.addWidget(self.remove_btn)
+        button_col.addStretch(1)
+        top_row.addLayout(button_col)
+        root.addLayout(top_row, 1)
+
+        self.permissions_label = QLabel("Permissions")
+        root.addWidget(self.permissions_label)
+
+        self.permissions_table = QTableWidget()
+        self.permissions_table.setColumnCount(3)
+        self.permissions_table.setHorizontalHeaderLabels(["Permission", "Allow", "Deny"])
+        self.permissions_table.verticalHeader().setVisible(False)
+        self.permissions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.permissions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.permissions_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.permissions_table.setSelectionMode(QAbstractItemView.NoSelection)
+        root.addWidget(self.permissions_table, 1)
+
+        bottom_row = QHBoxLayout()
+        self.meta_label = QLabel("")
+        self.advanced_btn = QPushButton("Advanced")
+        self.advanced_btn.setEnabled(False)
+        self.apply_btn = QPushButton("Apply Security")
+        bottom_row.addWidget(self.meta_label, 1)
+        bottom_row.addWidget(self.advanced_btn)
+        bottom_row.addWidget(self.apply_btn)
+        root.addLayout(bottom_row)
+
+        self.add_btn.clicked.connect(self.add_principal)
+        self.remove_btn.clicked.connect(self.remove_selected_principal)
+        self.principal_list.itemSelectionChanged.connect(self.on_principal_changed)
+        self.permissions_table.itemChanged.connect(self.on_permission_item_changed)
+        self.apply_btn.clicked.connect(self.apply_security_changes)
+
+        self._build_permission_rows()
+        self.reload_from_directory()
+
+    def _build_permission_rows(self) -> None:
+        self.permissions_table.setRowCount(len(self.PERMISSIONS))
+        for row, (perm_name, _mask) in enumerate(self.PERMISSIONS):
+            perm_item = QTableWidgetItem(perm_name)
+            perm_item.setFlags(Qt.ItemIsEnabled)
+            self.permissions_table.setItem(row, 0, perm_item)
+            for col in [1, 2]:
+                box = QTableWidgetItem("")
+                box.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                box.setCheckState(Qt.Unchecked)
+                self.permissions_table.setItem(row, col, box)
+
+    def reload_from_directory(self) -> None:
+        details = self.ldap.get_security_descriptor_details(self.object_dn)
+        if details.get("error"):
+            self.meta_label.setText(f"Unable to read security descriptor: {details.get('error')}")
+            self.setEnabled(False)
+            return
+
+        self.setEnabled(True)
+        self.owner_sid = str(details.get("owner_sid", ""))
+        self.group_sid = str(details.get("group_sid", ""))
+        self.original_control = int(details.get("control", 0x8004))
+        self.principals = {}
+        self.display_by_sid = {}
+
+        for ace in details.get("dacl", []):
+            sid = str(ace.get("trustee_sid", "")).strip()
+            if not sid:
+                continue
+            entry = self.principals.setdefault(sid, {"allow": 0, "deny": 0})
+            ace_type = int(ace.get("ace_type", -1))
+            mask_value = int(ace.get("mask_value", 0))
+            if ace_type in (0x00, 0x05):
+                entry["allow"] |= mask_value
+            elif ace_type in (0x01, 0x06):
+                entry["deny"] |= mask_value
+
+        self.principal_list.clear()
+        for sid in sorted(self.principals.keys()):
+            label = self.resolve_sid_label(sid)
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, sid)
+            self.principal_list.addItem(item)
+
+        if self.principal_list.count() > 0:
+            self.principal_list.setCurrentRow(0)
+        self.meta_label.setText(f"Owner: {self.owner_sid}   Group: {self.group_sid}")
+
+    def resolve_sid_label(self, sid: str) -> str:
+        cached = self.display_by_sid.get(sid)
+        if cached:
+            return cached
+
+        display_name = ""
+        sam_name = ""
+        netbios_hint = ""
+        try:
+            if self.ldap.conn:
+                # AD-specific SID bind form resolves across partitions better than objectSid filters.
+                self.ldap.conn.search(
+                    search_base=f"<SID={sid}>",
+                    search_filter="(objectClass=*)",
+                    search_scope=BASE,
+                    attributes=["displayName", "sAMAccountName", "cn", "name", "distinguishedName"],
+                )
+                if self.ldap.conn.entries:
+                    entry = self.ldap.conn.entries[0]
+                    for attr in ["displayName", "cn", "name"]:
+                        values = self.ldap._entry_attr_values(entry, attr)
+                        if values:
+                            display_name = values[0]
+                            break
+                    sam_values = self.ldap._entry_attr_values(entry, "sAMAccountName")
+                    if sam_values:
+                        sam_name = sam_values[0]
+
+                    dn_values = self.ldap._entry_attr_values(entry, "distinguishedName")
+                    if dn_values:
+                        dn = dn_values[0]
+                        dc_parts = [part[3:] for part in dn.split(",") if part.upper().startswith("DC=")]
+                        if dc_parts:
+                            netbios_hint = dc_parts[0].upper()
+        except Exception:
+            pass
+
+        if not display_name and sam_name:
+            display_name = sam_name
+        if not display_name:
+            rendered = sid
+        elif sam_name:
+            qualifier = f"{netbios_hint}\\{sam_name}" if netbios_hint else sam_name
+            rendered = f"{display_name} ({qualifier})"
+        else:
+            rendered = display_name
+
+        self.display_by_sid[sid] = rendered
+        return rendered
+
+    def on_principal_changed(self) -> None:
+        self._capture_permission_checkboxes()
+        item = self.principal_list.currentItem()
+        self.remove_btn.setEnabled(item is not None)
+        if item is None:
+            self.permissions_label.setText("Permissions")
+            self._loading_permissions = True
+            for row in range(self.permissions_table.rowCount()):
+                self.permissions_table.item(row, 1).setCheckState(Qt.Unchecked)
+                self.permissions_table.item(row, 2).setCheckState(Qt.Unchecked)
+            self._loading_permissions = False
+            return
+
+        sid = str(item.data(Qt.UserRole))
+        data = self.principals.get(sid, {"allow": 0, "deny": 0})
+        self.permissions_label.setText(f"Permissions for {item.text().split(' (')[0]}")
+        allow_mask = int(data.get("allow", 0))
+        deny_mask = int(data.get("deny", 0))
+        self._loading_permissions = True
+        for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
+            self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
+        self._loading_permissions = False
+
+    def on_permission_item_changed(self, _item: QTableWidgetItem) -> None:
+        if self._loading_permissions:
+            return
+        self._capture_permission_checkboxes()
+
+    def add_principal(self) -> None:
+        dlg = SelectDirectoryObjectsDialog(
+            self.ldap,
+            self.search_base,
+            self,
+            search_options=[("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS)],
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected = dlg.selected_objects()
+        if not selected:
+            return
+        obj = selected[0]
+        try:
+            display, sid = self.ldap.get_object_display_and_sid(obj.dn)
+        except Exception as e:
+            QMessageBox.critical(self, "Add principal failed", str(e))
+            return
+
+        if sid not in self.principals:
+            self.principals[sid] = {"allow": 0, "deny": 0}
+        self.display_by_sid[sid] = f"{display} ({sid})"
+        self.refresh_principal_list(select_sid=sid)
+
+    def remove_selected_principal(self) -> None:
+        item = self.principal_list.currentItem()
+        if not item:
+            return
+        sid = str(item.data(Qt.UserRole))
+        if sid in self.principals:
+            del self.principals[sid]
+        self.refresh_principal_list()
+
+    def refresh_principal_list(self, select_sid: str = "") -> None:
+        self.principal_list.clear()
+        target_row = -1
+        for row, sid in enumerate(sorted(self.principals.keys())):
+            label = self.resolve_sid_label(sid)
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, sid)
+            self.principal_list.addItem(item)
+            if sid == select_sid:
+                target_row = row
+        if target_row >= 0:
+            self.principal_list.setCurrentRow(target_row)
+        elif self.principal_list.count() > 0:
+            self.principal_list.setCurrentRow(0)
+
+    def _build_dacl_bytes(self) -> bytes:
+        ace_payloads: list[bytes] = []
+        for sid in sorted(self.principals.keys()):
+            data = self.principals[sid]
+            sid_bytes = sid_to_bytes(sid)
+            allow_mask = int(data.get("allow", 0))
+            deny_mask = int(data.get("deny", 0))
+
+            if deny_mask:
+                ace_size = 8 + len(sid_bytes)
+                ace_payloads.append(bytes([0x01, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", deny_mask) + sid_bytes)
+            if allow_mask:
+                ace_size = 8 + len(sid_bytes)
+                ace_payloads.append(bytes([0x00, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", allow_mask) + sid_bytes)
+
+        acl_size = 8 + sum(len(ace) for ace in ace_payloads)
+        header = struct.pack("<BBHHH", 0x02, 0x00, acl_size, len(ace_payloads), 0x0000)
+        return header + b"".join(ace_payloads)
+
+    def _build_security_descriptor(self) -> bytes:
+        owner_bytes = sid_to_bytes(self.owner_sid) if self.owner_sid else b""
+        group_bytes = sid_to_bytes(self.group_sid) if self.group_sid else b""
+        dacl_bytes = self._build_dacl_bytes()
+
+        offset = 20
+        owner_off = offset if owner_bytes else 0
+        offset += len(owner_bytes)
+        group_off = offset if group_bytes else 0
+        offset += len(group_bytes)
+        dacl_off = offset if dacl_bytes else 0
+
+        control = (self.original_control | 0x8000 | 0x0004)
+        header = struct.pack("<BBHLLLL", 1, 0, control, owner_off, group_off, 0, dacl_off)
+        return header + owner_bytes + group_bytes + dacl_bytes
+
+    def _capture_permission_checkboxes(self) -> None:
+        item = self.principal_list.currentItem()
+        if not item:
+            return
+        sid = str(item.data(Qt.UserRole))
+        allow_mask = 0
+        deny_mask = 0
+        for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            if self.permissions_table.item(row, 1).checkState() == Qt.Checked:
+                allow_mask |= bit
+            if self.permissions_table.item(row, 2).checkState() == Qt.Checked:
+                deny_mask |= bit
+        self.principals[sid] = {"allow": allow_mask, "deny": deny_mask}
+
+    def apply_security_changes(self) -> None:
+        self._capture_permission_checkboxes()
+        try:
+            sd = self._build_security_descriptor()
+            self.ldap.set_security_descriptor(self.object_dn, sd)
+        except Exception as e:
+            QMessageBox.critical(self, "Apply security failed", str(e))
+            return
+
+        QMessageBox.information(self, "Security", "Security permissions were updated.")
+        self.reload_from_directory()
+
+
+def build_acl_viewer_tab(ldap: LdapManager, object_dn: str, search_base: str) -> QWidget:
+    return SecurityAclEditor(ldap, object_dn, search_base)
 
 
 class PropertiesDialog(QDialog):
-    def __init__(self, obj: LdapObject, attrs: dict[str, list[str]], parent=None) -> None:
+    def __init__(
+        self,
+        ldap: LdapManager,
+        obj: LdapObject,
+        attrs: dict[str, list[str]],
+        search_base: str,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(obj.name)
         self.resize(800, 600)
@@ -1595,6 +2310,7 @@ class PropertiesDialog(QDialog):
         attributes_layout.addWidget(text)
 
         tabs.addTab(attributes_tab, "Attributes")
+        tabs.addTab(build_acl_viewer_tab(ldap, obj.dn, search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -1670,6 +2386,7 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
         tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -2406,6 +3123,7 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
         tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3153,10 +3871,7 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
 
-        security_tab = QWidget()
-        security_layout = QVBoxLayout(security_tab)
-        security_layout.addWidget(QLabel("Security editor not implemented yet."))
-        tabs.addTab(security_tab, "Security")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3750,6 +4465,8 @@ class MainWindow(QMainWindow):
         self.saved_host = ""
         self.saved_port = 636
         self.auto_connect = False
+        self.connection_profiles: list[ConnectionProfile] = []
+        self.active_profile_name = ""
         self.last_bind_user = ""
         self.last_bind_password = ""
         self.connection_alert_shown = False
@@ -4037,7 +4754,42 @@ class MainWindow(QMainWindow):
         self.saved_host = str(data.get("host", ""))
         self.saved_port = int(data.get("port", 636))
         self.auto_connect = bool(data.get("auto_connect", False))
+        self.active_profile_name = str(data.get("active_profile", ""))
         self.show_advanced_features = bool(data.get("show_advanced_features", True))
+
+        self.connection_profiles = []
+        profile_items = data.get("connection_profiles", [])
+        if isinstance(profile_items, list):
+            for profile in profile_items:
+                if not isinstance(profile, dict):
+                    continue
+                name = str(profile.get("name", "")).strip()
+                host = str(profile.get("host", "")).strip()
+                if not name or not host:
+                    continue
+                try:
+                    port = int(profile.get("port", 636))
+                except (TypeError, ValueError):
+                    port = 636
+                auth_mode = str(profile.get("auth_mode", "credentials"))
+                bind_user = str(profile.get("bind_user", ""))
+                store_password = bool(profile.get("store_password", False))
+                self.connection_profiles.append(
+                    ConnectionProfile(
+                        name=name,
+                        host=host,
+                        port=port,
+                        auth_mode=auth_mode,
+                        bind_user=bind_user,
+                        store_password=store_password,
+                    )
+                )
+
+        active_profile = self.find_connection_profile(self.active_profile_name)
+        if active_profile is not None:
+            self.auth_mode = active_profile.auth_mode
+            self.saved_host = active_profile.host
+            self.saved_port = active_profile.port
 
         widths = data.get("main_table_column_widths", [])
         if isinstance(widths, list):
@@ -4075,6 +4827,18 @@ class MainWindow(QMainWindow):
             "port": self.saved_port,
             "auto_connect": self.auto_connect,
             "show_advanced_features": self.show_advanced_features,
+            "active_profile": self.active_profile_name,
+            "connection_profiles": [
+                {
+                    "name": profile.name,
+                    "host": profile.host,
+                    "port": profile.port,
+                    "auth_mode": profile.auth_mode,
+                    "bind_user": profile.bind_user,
+                    "store_password": profile.store_password,
+                }
+                for profile in self.connection_profiles
+            ],
             "main_table_column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
             "window_width": self.width(),
             "window_height": self.height(),
@@ -4082,6 +4846,15 @@ class MainWindow(QMainWindow):
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+    def find_connection_profile(self, profile_name: str) -> Optional[ConnectionProfile]:
+        target = profile_name.strip()
+        if not target:
+            return None
+        for profile in self.connection_profiles:
+            if profile.name == target:
+                return profile
+        return None
 
     def apply_saved_main_table_widths(self) -> None:
         if not self.main_table_column_widths:
@@ -4106,14 +4879,29 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def auto_connect_if_configured(self) -> None:
-        if self.auth_mode != "kerberos":
+        if not self.saved_host:
             return
 
         try:
             def connect_and_load() -> None:
-                self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
-                self.last_bind_user = ""
-                self.last_bind_password = ""
+                if self.auth_mode == "kerberos":
+                    self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
+                    self.last_bind_user = ""
+                    self.last_bind_password = ""
+                else:
+                    bind_user = self.last_bind_user
+                    bind_password = self.last_bind_password
+                    if self.active_profile_name:
+                        profile = self.find_connection_profile(self.active_profile_name)
+                        if profile is not None:
+                            bind_user = profile.bind_user
+                            if profile.store_password:
+                                bind_password = CredentialStore.get_password(profile.name)
+                    if not bind_user or not bind_password:
+                        raise ValueError("Saved credentials are not available for auto-connect.")
+                    self.ldap.connect_simple(self.saved_host, bind_user, bind_password, port=self.saved_port)
+                    self.last_bind_user = bind_user
+                    self.last_bind_password = bind_password
                 self.reset_connection_alert()
 
                 self.populate_roots()
@@ -4134,11 +4922,19 @@ class MainWindow(QMainWindow):
         self.save_settings()
 
     def show_connect_dialog(self) -> None:
-        dlg = ConnectDialog(self.auth_mode, self.saved_host, self.saved_port, self)
+        dlg = ConnectDialog(
+            self.auth_mode,
+            self.saved_host,
+            self.saved_port,
+            profiles=self.connection_profiles,
+            selected_profile=self.active_profile_name,
+            parent=self,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
 
         host, port, bind_user, password = dlg.values()
+        self.auth_mode = dlg.selected_auth_mode()
 
         try:
             if self.auth_mode == "kerberos":
@@ -4155,6 +4951,42 @@ class MainWindow(QMainWindow):
 
         self.saved_host = host
         self.saved_port = port
+
+        if dlg.save_profile_enabled():
+            profile_name = dlg.selected_profile_name()
+            if profile_name:
+                existing = self.find_connection_profile(profile_name)
+                if existing is None:
+                    self.connection_profiles.append(
+                        ConnectionProfile(
+                            name=profile_name,
+                            host=host,
+                            port=port,
+                            auth_mode=self.auth_mode,
+                            bind_user=bind_user,
+                            store_password=dlg.save_password_enabled(),
+                        )
+                    )
+                    existing = self.connection_profiles[-1]
+                else:
+                    existing.host = host
+                    existing.port = port
+                    existing.auth_mode = self.auth_mode
+                    existing.bind_user = bind_user
+                    existing.store_password = dlg.save_password_enabled()
+
+                self.active_profile_name = profile_name
+                if dlg.save_password_enabled():
+                    if not CredentialStore.set_password(profile_name, password):
+                        existing.store_password = False
+                        QMessageBox.warning(
+                            self,
+                            "Credential storage unavailable",
+                            "Connected successfully, but credentials could not be saved to the system keyring.",
+                        )
+                else:
+                    CredentialStore.delete_password(profile_name)
+
         self.reset_connection_alert()
         self.save_settings()
         self.populate_roots()
@@ -4377,7 +5209,7 @@ class MainWindow(QMainWindow):
         elif obj.object_type == "Computer" and search_base:
             dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         else:
-            dlg = PropertiesDialog(obj, attrs, self)
+            dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         dlg.exec()
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
