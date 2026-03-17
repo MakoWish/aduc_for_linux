@@ -10,6 +10,7 @@ import struct
 import sys
 import urllib.error
 import urllib.request
+import ldap3
 import webbrowser
 import time
 import uuid
@@ -57,7 +58,7 @@ from PySide6.QtWidgets import (
     QSplashScreen,
 )
 
-from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, ENCRYPT, Connection, Server, Tls
+from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, Connection, Server, Tls
 
 try:
     import keyring
@@ -720,7 +721,7 @@ class LdapManager:
             self.server,
             authentication=SASL,
             sasl_mechanism="GSSAPI",
-            session_security=ENCRYPT,
+            session_security=getattr(ldap3, "ENCRYPT", "ENCRYPT"),
             auto_bind=True,
             raise_exceptions=True,
         )
