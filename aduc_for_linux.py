@@ -2240,14 +2240,19 @@ class SecurityAclEditor(QWidget):
                 if row == self.FULL_CONTROL_INDEX:
                     state = item.checkState()
                     for perm_row in range(len(self.PERMISSIONS)):
-                        self.permissions_table.item(perm_row, col).setCheckState(state)
+                        perm_item = self.permissions_table.item(perm_row, col)
+                        if perm_item is not None:
+                            perm_item.setCheckState(state)
                 else:
                     all_checked = True
                     for perm_row in range(1, len(self.PERMISSIONS)):
-                        if self.permissions_table.item(perm_row, col).checkState() != Qt.Checked:
+                        perm_item = self.permissions_table.item(perm_row, col)
+                        if perm_item is None or perm_item.checkState() != Qt.Checked:
                             all_checked = False
                             break
-                    self.permissions_table.item(self.FULL_CONTROL_INDEX, col).setCheckState(Qt.Checked if all_checked else Qt.Unchecked)
+                    full_control_item = self.permissions_table.item(self.FULL_CONTROL_INDEX, col)
+                    if full_control_item is not None:
+                        full_control_item.setCheckState(Qt.Checked if all_checked else Qt.Unchecked)
             finally:
                 self._loading_permissions = False
 
