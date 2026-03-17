@@ -717,14 +717,17 @@ class LdapManager:
     def connect_kerberos(self, host: str, port: int = 636) -> None:
         tls = Tls(validate=ssl.CERT_REQUIRED)
         self.server = Server(host, port=port, use_ssl=True, get_info=ALL, tls=tls)
-        self.conn = Connection(
-            self.server,
-            authentication=SASL,
-            sasl_mechanism="GSSAPI",
-            session_security=getattr(ldap3, "ENCRYPT", "ENCRYPT"),
-            auto_bind=True,
-            raise_exceptions=True,
-        )
+        kwargs = {
+            "authentication": SASL,
+            "sasl_mechanism": "GSSAPI",
+            "auto_bind": True,
+            "raise_exceptions": True,
+        }
+        encrypt_value = getattr(ldap3, "ENCRYPT", "ENCRYPT")
+        try:
+            self.conn = Connection(self.server, session_security=encrypt_value, **kwargs)
+        except TypeError:
+            self.conn = Connection(self.server, **kwargs)
 
     @staticmethod
     def _entry_attr_values(entry: Any, attr_name: str) -> list[str]:
