@@ -1838,6 +1838,8 @@ class ConnectDialog(QDialog):
         self.profile_name_edit = QLineEdit(selected_profile)
         self.save_profile_checkbox = QCheckBox("Save/update this connection profile")
         self.save_password_checkbox = QCheckBox("Save password in system keyring")
+        self.delete_profile_btn = QPushButton("Delete saved profile")
+        self.deleted_profile_names: set[str] = set()
 
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("dc01.example.com")
@@ -1859,7 +1861,10 @@ class ConnectDialog(QDialog):
             self.password_edit.setText(TEST_BIND_PASSWORD)
 
         form = QFormLayout()
-        form.addRow("Profile:", self.profile_combo)
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(self.profile_combo, 1)
+        profile_row.addWidget(self.delete_profile_btn)
+        form.addRow("Profile:", profile_row)
         form.addRow("Profile name:", self.profile_name_edit)
         form.addRow("Authentication:", self.auth_mode_combo)
         form.addRow("Auto-connect on launch:", self.auto_connect_combo)
@@ -1881,6 +1886,7 @@ class ConnectDialog(QDialog):
         self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
         self.auth_mode_combo.currentIndexChanged.connect(self.update_auth_fields)
         self.save_profile_checkbox.toggled.connect(self.update_profile_controls)
+        self.delete_profile_btn.clicked.connect(self.delete_selected_profile)
         self.update_auth_fields()
         self.update_profile_controls()
         self.on_profile_selected()
@@ -1905,6 +1911,9 @@ class ConnectDialog(QDialog):
 
     def selected_profile_name(self) -> str:
         return self.profile_name_edit.text().strip()
+
+    def deleted_profiles(self) -> list[str]:
+        return sorted(self.deleted_profile_names)
 
     def save_profile_enabled(self) -> bool:
         return self.save_profile_checkbox.isChecked()
@@ -1955,6 +1964,26 @@ class ConnectDialog(QDialog):
         enabled = self.save_profile_checkbox.isChecked()
         self.profile_name_edit.setEnabled(enabled)
         self.save_password_checkbox.setEnabled(enabled and self.selected_auth_mode() == "credentials")
+
+    def delete_selected_profile(self) -> None:
+        selected = str(self.profile_combo.currentData() or "")
+        if not selected:
+            return
+        if QMessageBox.question(
+            self,
+            "Delete saved profile",
+            f"Delete saved profile '{selected}' and its stored password?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+
+        self.deleted_profile_names.add(selected)
+        self.profiles = [profile for profile in self.profiles if profile.name != selected]
+
+        idx = self.profile_combo.currentIndex()
+        self.profile_combo.removeItem(idx)
+        self.profile_combo.setCurrentIndex(0)
 
 
 class OptionsDialog(QDialog):
@@ -5084,6 +5113,18 @@ class MainWindow(QMainWindow):
                 return profile
         return None
 
+    def delete_connection_profiles(self, profile_names: list[str]) -> None:
+        targets = {name.strip() for name in profile_names if name.strip()}
+        if not targets:
+            return
+
+        self.connection_profiles = [profile for profile in self.connection_profiles if profile.name not in targets]
+        for name in targets:
+            CredentialStore.delete_password(name)
+
+        if self.active_profile_name in targets:
+            self.active_profile_name = ""
+
     def apply_saved_main_table_widths(self) -> None:
         if not self.main_table_column_widths:
             return
@@ -5150,7 +5191,13 @@ class MainWindow(QMainWindow):
             auto_connect=self.auto_connect,
             parent=self,
         )
-        if dlg.exec() != QDialog.Accepted:
+        result = dlg.exec()
+        deleted_profiles = dlg.deleted_profiles()
+        if deleted_profiles:
+            self.delete_connection_profiles(deleted_profiles)
+            self.save_settings()
+
+        if result != QDialog.Accepted:
             return
 
         host, port, bind_user, password = dlg.values()
@@ -6053,6 +6100,37 @@ class MainWindow(QMainWindow):
     def on_table_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
         if not item:
+            if not self.current_dn:
+                return
+            menu = QMenu(self)
+            _, create_actions = self.add_new_submenu(menu, self.current_dn)
+            create_user_action = create_actions.get("user")
+            create_group_action = create_actions.get("group")
+            create_computer_action = create_actions.get("computer")
+            create_ou_action = create_actions.get("organizational_unit")
+            menu.addSeparator()
+            refresh_action = menu.addAction("Refresh")
+            chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+            if not chosen:
+                return
+            if create_user_action is not None and chosen == create_user_action:
+                self.create_user_under_dn(self.current_dn)
+            elif create_group_action is not None and chosen == create_group_action:
+                self.create_group_under_dn(self.current_dn)
+            elif create_computer_action is not None and chosen == create_computer_action:
+                self.create_computer_under_dn(self.current_dn)
+            elif create_ou_action is not None and chosen == create_ou_action:
+                name, ok = QInputDialog.getText(self, "New Organizational Unit", "Name:")
+                name = name.strip()
+                if ok and name:
+                    try:
+                        self.ldap.create_organizational_unit(self.current_dn, name)
+                    except Exception as e:
+                        self.show_error("Create OU failed", str(e))
+                        return
+                    self.refresh_current()
+            elif chosen == refresh_action:
+                self.refresh_current()
             return
 
         row = item.row()
