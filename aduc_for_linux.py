@@ -1961,6 +1961,9 @@ class SecurityAclEditor(QWidget):
         ("Change Permissions", 0x00040000),
         ("Take Ownership", 0x00080000),
     ]
+    MAPPED_PERMISSION_MASK = 0
+    for _, _perm_mask in PERMISSIONS:
+        MAPPED_PERMISSION_MASK |= _perm_mask
 
     def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None) -> None:
         super().__init__(parent)
@@ -2019,7 +2022,7 @@ class SecurityAclEditor(QWidget):
 
         self.add_btn.clicked.connect(self.add_principal)
         self.remove_btn.clicked.connect(self.remove_selected_principal)
-        self.principal_list.itemSelectionChanged.connect(self.on_principal_changed)
+        self.principal_list.currentItemChanged.connect(self.on_principal_changed)
         self.permissions_table.itemChanged.connect(self.on_permission_item_changed)
         self.apply_btn.clicked.connect(self.apply_security_changes)
 
@@ -2027,7 +2030,8 @@ class SecurityAclEditor(QWidget):
         self.reload_from_directory()
 
     def _build_permission_rows(self) -> None:
-        self.permissions_table.setRowCount(len(self.PERMISSIONS))
+        self.special_row_index = len(self.PERMISSIONS)
+        self.permissions_table.setRowCount(len(self.PERMISSIONS) + 1)
         for row, (perm_name, _mask) in enumerate(self.PERMISSIONS):
             perm_item = QTableWidgetItem(perm_name)
             perm_item.setFlags(Qt.ItemIsEnabled)
@@ -2037,6 +2041,16 @@ class SecurityAclEditor(QWidget):
                 box.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
                 box.setCheckState(Qt.Unchecked)
                 self.permissions_table.setItem(row, col, box)
+
+        special_item = QTableWidgetItem("Special (unmapped)")
+        special_item.setFlags(Qt.ItemIsEnabled)
+        self.permissions_table.setItem(self.special_row_index, 0, special_item)
+        for col in [1, 2]:
+            box = QTableWidgetItem("")
+            box.setFlags(Qt.ItemIsEnabled)
+            box.setCheckState(Qt.Unchecked)
+            self.permissions_table.setItem(self.special_row_index, col, box)
+        self.permissions_table.setRowHidden(self.special_row_index, True)
 
     def reload_from_directory(self) -> None:
         details = self.ldap.get_security_descriptor_details(self.object_dn)
@@ -2114,10 +2128,19 @@ class SecurityAclEditor(QWidget):
 
         if not display_name and sam_name:
             display_name = sam_name
+        if sam_name and netbios_hint:
+            qualifier = f"{netbios_hint}\\{sam_name}"
+        elif sam_name:
+            qualifier = sam_name
+        else:
+            qualifier = ""
+
+        if not display_name and qualifier:
+            display_name = qualifier
+
         if not display_name:
             rendered = sid
-        elif sam_name:
-            qualifier = f"{netbios_hint}\\{sam_name}" if netbios_hint else sam_name
+        elif qualifier and display_name != qualifier:
             rendered = f"{display_name} ({qualifier})"
         else:
             rendered = display_name
@@ -2125,27 +2148,37 @@ class SecurityAclEditor(QWidget):
         self.display_by_sid[sid] = rendered
         return rendered
 
-    def on_principal_changed(self) -> None:
-        item = self.principal_list.currentItem()
-        self.remove_btn.setEnabled(item is not None)
-        if item is None:
+    def on_principal_changed(self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]) -> None:
+        if previous is not None and not self._loading_permissions:
+            previous_sid = str(previous.data(Qt.UserRole))
+            self._capture_permission_checkboxes_for_sid(previous_sid)
+
+        self.remove_btn.setEnabled(current is not None)
+        if current is None:
             self.permissions_label.setText("Permissions")
             self._loading_permissions = True
             for row in range(self.permissions_table.rowCount()):
                 self.permissions_table.item(row, 1).setCheckState(Qt.Unchecked)
                 self.permissions_table.item(row, 2).setCheckState(Qt.Unchecked)
+            self.permissions_table.setRowHidden(self.special_row_index, True)
             self._loading_permissions = False
             return
 
-        sid = str(item.data(Qt.UserRole))
+        sid = str(current.data(Qt.UserRole))
         data = self.principals.get(sid, {"allow": 0, "deny": 0})
-        self.permissions_label.setText(f"Permissions for {item.text().split(' (')[0]}")
+        self.permissions_label.setText(f"Permissions for {current.text().split(' (')[0]}")
         allow_mask = int(data.get("allow", 0))
         deny_mask = int(data.get("deny", 0))
+        allow_unmapped = allow_mask & ~self.MAPPED_PERMISSION_MASK
+        deny_unmapped = deny_mask & ~self.MAPPED_PERMISSION_MASK
         self._loading_permissions = True
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
             self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
             self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
+        has_unmapped = bool(allow_unmapped or deny_unmapped)
+        self.permissions_table.setRowHidden(self.special_row_index, not has_unmapped)
+        self.permissions_table.item(self.special_row_index, 1).setCheckState(Qt.Checked if allow_unmapped else Qt.Unchecked)
+        self.permissions_table.item(self.special_row_index, 2).setCheckState(Qt.Checked if deny_unmapped else Qt.Unchecked)
         self._loading_permissions = False
 
     def on_permission_item_changed(self, _item: QTableWidgetItem) -> None:
@@ -2241,6 +2274,9 @@ class SecurityAclEditor(QWidget):
         if not item:
             return
         sid = str(item.data(Qt.UserRole))
+        self._capture_permission_checkboxes_for_sid(sid)
+
+    def _capture_permission_checkboxes_for_sid(self, sid: str) -> None:
         allow_mask = 0
         deny_mask = 0
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
@@ -2248,7 +2284,13 @@ class SecurityAclEditor(QWidget):
                 allow_mask |= bit
             if self.permissions_table.item(row, 2).checkState() == Qt.Checked:
                 deny_mask |= bit
-        self.principals[sid] = {"allow": allow_mask, "deny": deny_mask}
+        existing = self.principals.get(sid, {"allow": 0, "deny": 0})
+        allow_unmapped = int(existing.get("allow", 0)) & ~self.MAPPED_PERMISSION_MASK
+        deny_unmapped = int(existing.get("deny", 0)) & ~self.MAPPED_PERMISSION_MASK
+        self.principals[sid] = {
+            "allow": allow_mask | allow_unmapped,
+            "deny": deny_mask | deny_unmapped,
+        }
 
     def apply_security_changes(self) -> None:
         self._capture_permission_checkboxes()
