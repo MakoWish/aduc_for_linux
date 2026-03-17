@@ -141,7 +141,7 @@ Potential next improvements:
 ## Donate
 
 Like this project?  
-<a href="https://www.buymeacoffee.com/MakoWish>
+<a href="https://www.buymeacoffee.com/MakoWish">
     <img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" height="41" width="174">
 </a>
 
