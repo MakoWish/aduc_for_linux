@@ -172,6 +172,27 @@ def parse_sid(sid_bytes: bytes) -> str:
     return f"S-{revision}-{identifier_authority}" + "".join(f"-{value}" for value in subs)
 
 
+def sid_to_bytes(sid: str) -> bytes:
+    parts = sid.strip().split("-")
+    if len(parts) < 3 or parts[0].upper() != "S":
+        raise ValueError(f"Invalid SID: {sid}")
+
+    revision = int(parts[1])
+    identifier_authority = int(parts[2])
+    sub_authorities = [int(x) for x in parts[3:]]
+
+    if revision < 0 or revision > 255:
+        raise ValueError(f"Invalid SID revision: {revision}")
+    if identifier_authority < 0 or identifier_authority > 0xFFFFFFFFFFFF:
+        raise ValueError(f"Invalid SID identifier authority: {identifier_authority}")
+    if len(sub_authorities) > 255:
+        raise ValueError("SID has too many sub-authorities")
+
+    head = bytes([revision, len(sub_authorities)]) + identifier_authority.to_bytes(6, byteorder="big", signed=False)
+    body = b"".join(struct.pack("<I", value) for value in sub_authorities)
+    return head + body
+
+
 def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
     out = {
         "owner_sid": "",
@@ -191,6 +212,8 @@ def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
 
     if revision != 1:
         out["error"] = f"Unexpected security descriptor revision: {revision}"
+
+    out["control"] = int(control)
 
     def _read_sid(offset: int) -> str:
         if offset <= 0 or offset >= len(sd_bytes):
@@ -245,8 +268,11 @@ def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
         out["dacl"].append(
             {
                 "type": ace_type_map.get(ace_type, f"ACE_{ace_type}"),
+                "ace_type": int(ace_type),
                 "flags": f"0x{ace_flags:02X}",
+                "ace_flags": int(ace_flags),
                 "mask": f"0x{mask:08X}",
+                "mask_value": int(mask),
                 "trustee_sid": sid,
             }
         )
@@ -936,7 +962,63 @@ class LdapManager:
         parsed = parse_relative_security_descriptor(sd_bytes)
         parsed["base64"] = base64.b64encode(sd_bytes).decode("ascii")
         parsed["length"] = len(sd_bytes)
+        parsed["raw_bytes"] = sd_bytes
         return parsed
+
+    def set_security_descriptor(self, dn: str, sd_bytes: bytes) -> None:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        controls = None
+        try:
+            from ldap3.protocol.microsoft import security_descriptor_control
+
+            controls = security_descriptor_control(sdflags=0x04)
+        except Exception:
+            controls = None
+
+        ok = self.conn.modify(
+            dn,
+            {"nTSecurityDescriptor": [(MODIFY_REPLACE, [sd_bytes])]},
+            controls=controls,
+        )
+        if not ok:
+            raise ValueError(str(self.conn.result))
+
+    def get_object_display_and_sid(self, dn: str) -> tuple[str, str]:
+        if not self.conn:
+            raise ValueError("Not connected")
+
+        self.conn.search(
+            search_base=dn,
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["displayName", "cn", "name", "objectSid"],
+        )
+        if not self.conn.entries:
+            raise ValueError("Object not found")
+
+        entry = self.conn.entries[0]
+        display = dn
+        for attr in ["displayName", "cn", "name"]:
+            values = self._entry_attr_values(entry, attr)
+            if values:
+                display = values[0]
+                break
+
+        sid_values = []
+        try:
+            if "objectSid" in entry:
+                sid_values = entry["objectSid"].raw_values
+        except Exception:
+            sid_values = []
+        if not sid_values:
+            raise ValueError("Object SID unavailable")
+
+        sid_raw = sid_values[0]
+        if not isinstance(sid_raw, (bytes, bytearray)):
+            raise ValueError("Object SID is in an unexpected format")
+        return display, parse_sid(bytes(sid_raw))
 
     @staticmethod
     def _escape_search_term(term: str) -> str:
@@ -1845,54 +1927,312 @@ class OptionsDialog(QDialog):
         self.auto_connect_combo.setEnabled(not using_credentials)
 
 
-def build_acl_viewer_tab(ldap: LdapManager, object_dn: str) -> QWidget:
-    tab = QWidget()
-    layout = QVBoxLayout(tab)
+class SecurityAclEditor(QWidget):
+    PERMISSIONS: list[tuple[str, int]] = [
+        ("Full Control", 0x10000000),
+        ("Read", 0x80000000),
+        ("Write", 0x40000000),
+        ("Delete", 0x00010000),
+        ("Read Permissions", 0x00020000),
+        ("Change Permissions", 0x00040000),
+        ("Take Ownership", 0x00080000),
+    ]
 
-    details = ldap.get_security_descriptor_details(object_dn)
-    if details.get("error"):
-        layout.addWidget(QLabel(f"Security descriptor unavailable: {details['error']}"))
-        return tab
+    def __init__(self, ldap: LdapManager, object_dn: str, search_base: str, parent=None) -> None:
+        super().__init__(parent)
+        self.ldap = ldap
+        self.object_dn = object_dn
+        self.search_base = search_base
+        self.owner_sid = ""
+        self.group_sid = ""
+        self.original_control = 0x8004
+        self.principals: dict[str, dict[str, Any]] = {}
+        self.display_by_sid: dict[str, str] = {}
+        self._loading_permissions = False
 
-    summary = QFormLayout()
-    summary.addRow("Owner SID:", QLabel(str(details.get("owner_sid", ""))))
-    summary.addRow("Primary Group SID:", QLabel(str(details.get("group_sid", ""))))
-    summary.addRow("Raw length:", QLabel(str(details.get("length", 0))))
-    layout.addLayout(summary)
+        root = QVBoxLayout(self)
 
-    acl_table = QTableWidget()
-    acl_table.setColumnCount(4)
-    acl_table.setHorizontalHeaderLabels(["Type", "Flags", "Access Mask", "Trustee SID"])
-    acl_table.setEditTriggers(QTableWidget.NoEditTriggers)
-    acl_table.setSelectionMode(QTableWidget.NoSelection)
-    acl_table.verticalHeader().setVisible(False)
-    acl_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-    acl_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-    acl_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-    acl_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        top_label = QLabel("Group or user names:")
+        root.addWidget(top_label)
 
-    dacl = details.get("dacl", [])
-    acl_table.setRowCount(len(dacl))
-    for row, ace in enumerate(dacl):
-        acl_table.setItem(row, 0, QTableWidgetItem(str(ace.get("type", ""))))
-        acl_table.setItem(row, 1, QTableWidgetItem(str(ace.get("flags", ""))))
-        acl_table.setItem(row, 2, QTableWidgetItem(str(ace.get("mask", ""))))
-        acl_table.setItem(row, 3, QTableWidgetItem(str(ace.get("trustee_sid", ""))))
+        top_row = QHBoxLayout()
+        self.principal_list = QListWidget()
+        self.principal_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        top_row.addWidget(self.principal_list, 1)
 
-    layout.addWidget(acl_table)
+        button_col = QVBoxLayout()
+        self.add_btn = QPushButton("Add...")
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.setEnabled(False)
+        button_col.addWidget(self.add_btn)
+        button_col.addWidget(self.remove_btn)
+        button_col.addStretch(1)
+        top_row.addLayout(button_col)
+        root.addLayout(top_row, 1)
 
-    raw_sd = QTextEdit()
-    raw_sd.setReadOnly(True)
-    raw_sd.setPlainText(str(details.get("base64", "")))
-    raw_sd.setPlaceholderText("Base64-encoded nTSecurityDescriptor")
-    layout.addWidget(QLabel("Raw security descriptor (base64):"))
-    layout.addWidget(raw_sd)
+        self.permissions_label = QLabel("Permissions")
+        root.addWidget(self.permissions_label)
 
-    return tab
+        self.permissions_table = QTableWidget()
+        self.permissions_table.setColumnCount(3)
+        self.permissions_table.setHorizontalHeaderLabels(["Permission", "Allow", "Deny"])
+        self.permissions_table.verticalHeader().setVisible(False)
+        self.permissions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.permissions_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.permissions_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.permissions_table.setSelectionMode(QAbstractItemView.NoSelection)
+        root.addWidget(self.permissions_table, 1)
+
+        bottom_row = QHBoxLayout()
+        self.meta_label = QLabel("")
+        self.advanced_btn = QPushButton("Advanced")
+        self.advanced_btn.setEnabled(False)
+        self.apply_btn = QPushButton("Apply Security")
+        bottom_row.addWidget(self.meta_label, 1)
+        bottom_row.addWidget(self.advanced_btn)
+        bottom_row.addWidget(self.apply_btn)
+        root.addLayout(bottom_row)
+
+        self.add_btn.clicked.connect(self.add_principal)
+        self.remove_btn.clicked.connect(self.remove_selected_principal)
+        self.principal_list.itemSelectionChanged.connect(self.on_principal_changed)
+        self.permissions_table.itemChanged.connect(self.on_permission_item_changed)
+        self.apply_btn.clicked.connect(self.apply_security_changes)
+
+        self._build_permission_rows()
+        self.reload_from_directory()
+
+    def _build_permission_rows(self) -> None:
+        self.permissions_table.setRowCount(len(self.PERMISSIONS))
+        for row, (perm_name, _mask) in enumerate(self.PERMISSIONS):
+            perm_item = QTableWidgetItem(perm_name)
+            perm_item.setFlags(Qt.ItemIsEnabled)
+            self.permissions_table.setItem(row, 0, perm_item)
+            for col in [1, 2]:
+                box = QTableWidgetItem("")
+                box.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                box.setCheckState(Qt.Unchecked)
+                self.permissions_table.setItem(row, col, box)
+
+    def reload_from_directory(self) -> None:
+        details = self.ldap.get_security_descriptor_details(self.object_dn)
+        if details.get("error"):
+            self.meta_label.setText(f"Unable to read security descriptor: {details.get('error')}")
+            self.setEnabled(False)
+            return
+
+        self.setEnabled(True)
+        self.owner_sid = str(details.get("owner_sid", ""))
+        self.group_sid = str(details.get("group_sid", ""))
+        self.original_control = int(details.get("control", 0x8004))
+        self.principals = {}
+        self.display_by_sid = {}
+
+        for ace in details.get("dacl", []):
+            sid = str(ace.get("trustee_sid", "")).strip()
+            if not sid:
+                continue
+            entry = self.principals.setdefault(sid, {"allow": 0, "deny": 0})
+            ace_type = int(ace.get("ace_type", -1))
+            mask_value = int(ace.get("mask_value", 0))
+            if ace_type == 0x00:
+                entry["allow"] |= mask_value
+            elif ace_type == 0x01:
+                entry["deny"] |= mask_value
+
+        self.principal_list.clear()
+        for sid in sorted(self.principals.keys()):
+            label = self.resolve_sid_label(sid)
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, sid)
+            self.principal_list.addItem(item)
+
+        if self.principal_list.count() > 0:
+            self.principal_list.setCurrentRow(0)
+        self.meta_label.setText(f"Owner: {self.owner_sid}   Group: {self.group_sid}")
+
+    def resolve_sid_label(self, sid: str) -> str:
+        cached = self.display_by_sid.get(sid)
+        if cached:
+            return cached
+        label = sid
+        try:
+            if self.ldap.conn:
+                base_dn = self.ldap.get_default_naming_context() or self.search_base
+                if base_dn:
+                    self.ldap.conn.search(
+                        search_base=base_dn,
+                        search_filter=f"(objectSid={sid})",
+                        search_scope=SUBTREE,
+                        attributes=["displayName", "cn", "name"],
+                        size_limit=1,
+                    )
+                    if self.ldap.conn.entries:
+                        entry = self.ldap.conn.entries[0]
+                        for attr in ["displayName", "cn", "name"]:
+                            values = self.ldap._entry_attr_values(entry, attr)
+                            if values:
+                                label = values[0]
+                                break
+        except Exception:
+            label = sid
+
+        rendered = f"{label} ({sid})"
+        self.display_by_sid[sid] = rendered
+        return rendered
+
+    def on_principal_changed(self) -> None:
+        self._capture_permission_checkboxes()
+        item = self.principal_list.currentItem()
+        self.remove_btn.setEnabled(item is not None)
+        if item is None:
+            self.permissions_label.setText("Permissions")
+            self._loading_permissions = True
+            for row in range(self.permissions_table.rowCount()):
+                self.permissions_table.item(row, 1).setCheckState(Qt.Unchecked)
+                self.permissions_table.item(row, 2).setCheckState(Qt.Unchecked)
+            self._loading_permissions = False
+            return
+
+        sid = str(item.data(Qt.UserRole))
+        data = self.principals.get(sid, {"allow": 0, "deny": 0})
+        self.permissions_label.setText(f"Permissions for {item.text().split(' (')[0]}")
+        allow_mask = int(data.get("allow", 0))
+        deny_mask = int(data.get("deny", 0))
+        self._loading_permissions = True
+        for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
+            self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
+        self._loading_permissions = False
+
+    def on_permission_item_changed(self, _item: QTableWidgetItem) -> None:
+        if self._loading_permissions:
+            return
+        self._capture_permission_checkboxes()
+
+    def add_principal(self) -> None:
+        dlg = SelectDirectoryObjectsDialog(
+            self.ldap,
+            self.search_base,
+            self,
+            search_options=[("Users, Contacts, and Groups", SEARCH_FILTER_USERS_CONTACTS_GROUPS)],
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected = dlg.selected_objects()
+        if not selected:
+            return
+        obj = selected[0]
+        try:
+            display, sid = self.ldap.get_object_display_and_sid(obj.dn)
+        except Exception as e:
+            QMessageBox.critical(self, "Add principal failed", str(e))
+            return
+
+        if sid not in self.principals:
+            self.principals[sid] = {"allow": 0, "deny": 0}
+        self.display_by_sid[sid] = f"{display} ({sid})"
+        self.refresh_principal_list(select_sid=sid)
+
+    def remove_selected_principal(self) -> None:
+        item = self.principal_list.currentItem()
+        if not item:
+            return
+        sid = str(item.data(Qt.UserRole))
+        if sid in self.principals:
+            del self.principals[sid]
+        self.refresh_principal_list()
+
+    def refresh_principal_list(self, select_sid: str = "") -> None:
+        self.principal_list.clear()
+        target_row = -1
+        for row, sid in enumerate(sorted(self.principals.keys())):
+            label = self.resolve_sid_label(sid)
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, sid)
+            self.principal_list.addItem(item)
+            if sid == select_sid:
+                target_row = row
+        if target_row >= 0:
+            self.principal_list.setCurrentRow(target_row)
+        elif self.principal_list.count() > 0:
+            self.principal_list.setCurrentRow(0)
+
+    def _build_dacl_bytes(self) -> bytes:
+        ace_payloads: list[bytes] = []
+        for sid in sorted(self.principals.keys()):
+            data = self.principals[sid]
+            sid_bytes = sid_to_bytes(sid)
+            allow_mask = int(data.get("allow", 0))
+            deny_mask = int(data.get("deny", 0))
+
+            if deny_mask:
+                ace_size = 8 + len(sid_bytes)
+                ace_payloads.append(bytes([0x01, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", deny_mask) + sid_bytes)
+            if allow_mask:
+                ace_size = 8 + len(sid_bytes)
+                ace_payloads.append(bytes([0x00, 0x00]) + struct.pack("<H", ace_size) + struct.pack("<I", allow_mask) + sid_bytes)
+
+        acl_size = 8 + sum(len(ace) for ace in ace_payloads)
+        header = struct.pack("<BBHHH", 0x02, 0x00, acl_size, len(ace_payloads), 0x0000)
+        return header + b"".join(ace_payloads)
+
+    def _build_security_descriptor(self) -> bytes:
+        owner_bytes = sid_to_bytes(self.owner_sid) if self.owner_sid else b""
+        group_bytes = sid_to_bytes(self.group_sid) if self.group_sid else b""
+        dacl_bytes = self._build_dacl_bytes()
+
+        offset = 20
+        owner_off = offset if owner_bytes else 0
+        offset += len(owner_bytes)
+        group_off = offset if group_bytes else 0
+        offset += len(group_bytes)
+        dacl_off = offset if dacl_bytes else 0
+
+        control = (self.original_control | 0x8000 | 0x0004)
+        header = struct.pack("<BBHLLLL", 1, 0, control, owner_off, group_off, 0, dacl_off)
+        return header + owner_bytes + group_bytes + dacl_bytes
+
+    def _capture_permission_checkboxes(self) -> None:
+        item = self.principal_list.currentItem()
+        if not item:
+            return
+        sid = str(item.data(Qt.UserRole))
+        allow_mask = 0
+        deny_mask = 0
+        for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
+            if self.permissions_table.item(row, 1).checkState() == Qt.Checked:
+                allow_mask |= bit
+            if self.permissions_table.item(row, 2).checkState() == Qt.Checked:
+                deny_mask |= bit
+        self.principals[sid] = {"allow": allow_mask, "deny": deny_mask}
+
+    def apply_security_changes(self) -> None:
+        self._capture_permission_checkboxes()
+        try:
+            sd = self._build_security_descriptor()
+            self.ldap.set_security_descriptor(self.object_dn, sd)
+        except Exception as e:
+            QMessageBox.critical(self, "Apply security failed", str(e))
+            return
+
+        QMessageBox.information(self, "Security", "Security permissions were updated.")
+        self.reload_from_directory()
+
+
+def build_acl_viewer_tab(ldap: LdapManager, object_dn: str, search_base: str) -> QWidget:
+    return SecurityAclEditor(ldap, object_dn, search_base)
 
 
 class PropertiesDialog(QDialog):
-    def __init__(self, ldap: LdapManager, obj: LdapObject, attrs: dict[str, list[str]], parent=None) -> None:
+    def __init__(
+        self,
+        ldap: LdapManager,
+        obj: LdapObject,
+        attrs: dict[str, list[str]],
+        search_base: str,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(obj.name)
         self.resize(800, 600)
@@ -1926,7 +2266,7 @@ class PropertiesDialog(QDialog):
         attributes_layout.addWidget(text)
 
         tabs.addTab(attributes_tab, "Attributes")
-        tabs.addTab(build_acl_viewer_tab(ldap, obj.dn), "Security")
+        tabs.addTab(build_acl_viewer_tab(ldap, obj.dn, search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -2002,7 +2342,7 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
         tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
-        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn), "Security")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -2739,7 +3079,7 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
         tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
-        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn), "Security")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn, self.search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3487,7 +3827,7 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
 
-        tabs.addTab(build_acl_viewer_tab(self.ldap, group_obj.dn), "Security")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -4806,7 +5146,7 @@ class MainWindow(QMainWindow):
         elif obj.object_type == "Computer" and search_base:
             dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         else:
-            dlg = PropertiesDialog(self.ldap, obj, attrs, self)
+            dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         dlg.exec()
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
