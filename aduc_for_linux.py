@@ -737,9 +737,9 @@ class LdapManager:
             message = str(e)
             if "Sign or Seal are required" in message:
                 raise ValueError(
-                    "Kerberos sign/seal is required by this server, but the installed ldap3 version "
-                    "does not support session_security. Please upgrade ldap3 in the app environment "
-                    "or use credential authentication for this domain."
+                    "Kerberos bind failed: this server requires SASL GSSAPI sign/seal, but ldap3 in this "
+                    "application path cannot negotiate that security layer. Use credential authentication "
+                    "for this domain, or relax the Samba LDAP strong-auth policy if acceptable in your environment."
                 ) from e
             raise
 
