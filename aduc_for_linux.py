@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import csv
+import base64
 import json
 import os
 import ssl
+import struct
 import sys
 import urllib.error
 import urllib.request
@@ -57,6 +59,11 @@ from PySide6.QtWidgets import (
 
 from ldap3 import ALL, BASE, LEVEL, SUBTREE, MODIFY_ADD, MODIFY_DELETE, MODIFY_REPLACE, SASL, Connection, Server, Tls
 
+try:
+    import keyring
+except Exception:
+    keyring = None
+
 
 # Hard-coded values used only during development
 TEST_DC = ""
@@ -100,6 +107,154 @@ SEARCH_FILTER_OPTIONS = [
     ("Computers", SEARCH_FILTER_COMPUTERS),
     ("Organizational Units", SEARCH_FILTER_ORGANIZATIONAL_UNITS),
 ]
+
+KEYRING_SERVICE_NAME = "aduc-for-linux"
+
+
+@dataclass
+class ConnectionProfile:
+    name: str
+    host: str
+    port: int
+    auth_mode: str
+    bind_user: str
+
+
+class CredentialStore:
+    @staticmethod
+    def available() -> bool:
+        return keyring is not None
+
+    @staticmethod
+    def _secret_name(profile_name: str) -> str:
+        return f"profile:{profile_name}"
+
+    @classmethod
+    def get_password(cls, profile_name: str) -> str:
+        if keyring is None:
+            return ""
+        try:
+            value = keyring.get_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name))
+            return value or ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def set_password(cls, profile_name: str, password: str) -> bool:
+        if keyring is None:
+            return False
+        try:
+            keyring.set_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name), password)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def delete_password(cls, profile_name: str) -> None:
+        if keyring is None:
+            return
+        try:
+            keyring.delete_password(KEYRING_SERVICE_NAME, cls._secret_name(profile_name))
+        except Exception:
+            pass
+
+
+def parse_sid(sid_bytes: bytes) -> str:
+    if len(sid_bytes) < 8:
+        return "<invalid SID>"
+    revision = sid_bytes[0]
+    sub_count = sid_bytes[1]
+    needed = 8 + (4 * sub_count)
+    if len(sid_bytes) < needed:
+        return "<invalid SID>"
+    identifier_authority = int.from_bytes(sid_bytes[2:8], byteorder="big", signed=False)
+    subs = [struct.unpack("<I", sid_bytes[8 + 4 * i: 12 + 4 * i])[0] for i in range(sub_count)]
+    return f"S-{revision}-{identifier_authority}" + "".join(f"-{value}" for value in subs)
+
+
+def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
+    out = {
+        "owner_sid": "",
+        "group_sid": "",
+        "dacl": [],
+        "error": "",
+    }
+    if len(sd_bytes) < 20:
+        out["error"] = "Descriptor is shorter than SECURITY_DESCRIPTOR header."
+        return out
+
+    try:
+        revision, _sbz1, control, owner_off, group_off, _sacl_off, dacl_off = struct.unpack("<BBHLLLL", sd_bytes[:20])
+    except struct.error:
+        out["error"] = "Unable to parse SECURITY_DESCRIPTOR header."
+        return out
+
+    if revision != 1:
+        out["error"] = f"Unexpected security descriptor revision: {revision}"
+
+    def _read_sid(offset: int) -> str:
+        if offset <= 0 or offset >= len(sd_bytes):
+            return ""
+        sub_count = sd_bytes[offset + 1] if offset + 1 < len(sd_bytes) else 0
+        sid_size = 8 + (4 * sub_count)
+        if offset + sid_size > len(sd_bytes):
+            return "<invalid SID>"
+        return parse_sid(sd_bytes[offset: offset + sid_size])
+
+    out["owner_sid"] = _read_sid(owner_off)
+    out["group_sid"] = _read_sid(group_off)
+
+    if dacl_off <= 0 or dacl_off + 8 > len(sd_bytes):
+        return out
+
+    ace_type_map = {
+        0x00: "ACCESS_ALLOWED",
+        0x01: "ACCESS_DENIED",
+        0x02: "SYSTEM_AUDIT",
+        0x03: "SYSTEM_ALARM",
+        0x05: "ACCESS_ALLOWED_OBJECT",
+        0x06: "ACCESS_DENIED_OBJECT",
+    }
+
+    dacl_data = sd_bytes[dacl_off:]
+    try:
+        _acl_rev, _acl_sbz1, acl_size, ace_count, _acl_sbz2 = struct.unpack("<BBHHH", dacl_data[:8])
+    except struct.error:
+        out["error"] = "Unable to parse DACL header."
+        return out
+
+    if acl_size > len(dacl_data):
+        acl_size = len(dacl_data)
+
+    cursor = 8
+    for _ in range(ace_count):
+        if cursor + 8 > acl_size:
+            break
+        ace_type = dacl_data[cursor]
+        ace_flags = dacl_data[cursor + 1]
+        ace_size = struct.unpack("<H", dacl_data[cursor + 2: cursor + 4])[0]
+        if ace_size <= 0 or cursor + ace_size > acl_size:
+            break
+
+        ace_bytes = dacl_data[cursor: cursor + ace_size]
+        mask = struct.unpack("<I", ace_bytes[4:8])[0] if len(ace_bytes) >= 8 else 0
+        sid = ""
+        if len(ace_bytes) >= 16:
+            sid = parse_sid(ace_bytes[8:])
+
+        out["dacl"].append(
+            {
+                "type": ace_type_map.get(ace_type, f"ACE_{ace_type}"),
+                "flags": f"0x{ace_flags:02X}",
+                "mask": f"0x{mask:08X}",
+                "trustee_sid": sid,
+            }
+        )
+
+        cursor += ace_size
+
+    _ = control
+    return out
 
 
 def parse_version(version: str) -> tuple[int, ...]:
@@ -735,6 +890,53 @@ class LdapManager:
                 out[attr] = ["<unreadable>"]
 
         return dict(sorted(out.items(), key=lambda kv: kv[0].lower()))
+
+    def get_security_descriptor_details(self, dn: str) -> dict[str, Any]:
+        if not self.conn:
+            return {"error": "Not connected"}
+
+        controls = None
+        try:
+            from ldap3.protocol.microsoft import security_descriptor_control
+
+            controls = security_descriptor_control(sdflags=0x04)
+        except Exception:
+            controls = None
+
+        try:
+            self.conn.search(
+                search_base=dn,
+                search_filter="(objectClass=*)",
+                search_scope=BASE,
+                attributes=["nTSecurityDescriptor"],
+                controls=controls,
+            )
+        except Exception as e:
+            return {"error": str(e)}
+
+        if not self.conn.entries:
+            return {"error": "Object not found"}
+
+        entry = self.conn.entries[0]
+        raw_values = []
+        try:
+            if "nTSecurityDescriptor" in entry:
+                raw_values = entry["nTSecurityDescriptor"].raw_values
+        except Exception:
+            raw_values = []
+
+        if not raw_values:
+            return {"error": "nTSecurityDescriptor is unavailable for this object/connection."}
+
+        value = raw_values[0]
+        if not isinstance(value, (bytes, bytearray)):
+            return {"error": "nTSecurityDescriptor returned in an unexpected format."}
+
+        sd_bytes = bytes(value)
+        parsed = parse_relative_security_descriptor(sd_bytes)
+        parsed["base64"] = base64.b64encode(sd_bytes).decode("ascii")
+        parsed["length"] = len(sd_bytes)
+        return parsed
 
     @staticmethod
     def _escape_search_term(term: str) -> str:
@@ -1453,10 +1655,39 @@ class LdapManager:
 
 
 class ConnectDialog(QDialog):
-    def __init__(self, auth_mode: str, saved_host: str = "", saved_port: int = 636, parent=None) -> None:
+    def __init__(
+        self,
+        auth_mode: str,
+        saved_host: str = "",
+        saved_port: int = 636,
+        profiles: Optional[list[ConnectionProfile]] = None,
+        selected_profile: str = "",
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Connect to Active Directory")
         self.auth_mode = auth_mode
+        self.profiles = profiles or []
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItem("Manual (unsaved)", "")
+        for profile in self.profiles:
+            self.profile_combo.addItem(profile.name, profile.name)
+        if selected_profile:
+            index = self.profile_combo.findData(selected_profile)
+            if index >= 0:
+                self.profile_combo.setCurrentIndex(index)
+
+        self.auth_mode_combo = QComboBox()
+        self.auth_mode_combo.addItem("Credentials", "credentials")
+        self.auth_mode_combo.addItem("Kerberos / SSO", "kerberos")
+        idx = self.auth_mode_combo.findData(auth_mode)
+        if idx >= 0:
+            self.auth_mode_combo.setCurrentIndex(idx)
+
+        self.profile_name_edit = QLineEdit(selected_profile)
+        self.save_profile_checkbox = QCheckBox("Save/update this connection profile")
+        self.save_password_checkbox = QCheckBox("Save password in system keyring")
 
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("dc01.example.com")
@@ -1477,17 +1708,16 @@ class ConnectDialog(QDialog):
         if TEST_BIND_PASSWORD:
             self.password_edit.setText(TEST_BIND_PASSWORD)
 
-        if self.auth_mode == "kerberos":
-            self.bind_user_edit.setEnabled(False)
-            self.password_edit.setEnabled(False)
-            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
-            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
-
         form = QFormLayout()
+        form.addRow("Profile:", self.profile_combo)
+        form.addRow("Profile name:", self.profile_name_edit)
+        form.addRow("Authentication:", self.auth_mode_combo)
         form.addRow("Server:", self.host_edit)
         form.addRow("Port:", self.port_edit)
         form.addRow("Bind user:", self.bind_user_edit)
         form.addRow("Password:", self.password_edit)
+        form.addRow("", self.save_profile_checkbox)
+        form.addRow("", self.save_password_checkbox)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -1496,6 +1726,13 @@ class ConnectDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(buttons)
+
+        self.profile_combo.currentIndexChanged.connect(self.on_profile_selected)
+        self.auth_mode_combo.currentIndexChanged.connect(self.update_auth_fields)
+        self.save_profile_checkbox.toggled.connect(self.update_profile_controls)
+        self.update_auth_fields()
+        self.update_profile_controls()
+        self.on_profile_selected()
 
         # Make the connect dialog wide enough for long title bars and field contents.
         hint = self.sizeHint()
@@ -1508,6 +1745,54 @@ class ConnectDialog(QDialog):
             self.bind_user_edit.text().strip(),
             self.password_edit.text(),
         )
+
+    def selected_auth_mode(self) -> str:
+        return str(self.auth_mode_combo.currentData())
+
+    def selected_profile_name(self) -> str:
+        return self.profile_name_edit.text().strip()
+
+    def save_profile_enabled(self) -> bool:
+        return self.save_profile_checkbox.isChecked()
+
+    def save_password_enabled(self) -> bool:
+        return self.save_password_checkbox.isChecked() and self.selected_auth_mode() == "credentials"
+
+    def on_profile_selected(self) -> None:
+        selected = str(self.profile_combo.currentData() or "")
+        if not selected:
+            return
+        for profile in self.profiles:
+            if profile.name != selected:
+                continue
+            self.profile_name_edit.setText(profile.name)
+            self.host_edit.setText(profile.host)
+            self.port_edit.setText(str(profile.port))
+            self.bind_user_edit.setText(profile.bind_user)
+            idx = self.auth_mode_combo.findData(profile.auth_mode)
+            if idx >= 0:
+                self.auth_mode_combo.setCurrentIndex(idx)
+            if profile.auth_mode == "credentials":
+                self.password_edit.setText(CredentialStore.get_password(profile.name))
+            self.save_profile_checkbox.setChecked(True)
+            break
+
+    def update_auth_fields(self) -> None:
+        kerberos = self.selected_auth_mode() == "kerberos"
+        self.bind_user_edit.setEnabled(not kerberos)
+        self.password_edit.setEnabled(not kerberos)
+        self.save_password_checkbox.setEnabled(not kerberos and self.save_profile_checkbox.isChecked())
+        if kerberos:
+            self.bind_user_edit.setPlaceholderText("Using current Kerberos ticket")
+            self.password_edit.setPlaceholderText("Using current Kerberos ticket")
+        else:
+            self.bind_user_edit.setPlaceholderText("admin@example.com or EXAMPLE\\admin")
+            self.password_edit.setPlaceholderText("")
+
+    def update_profile_controls(self) -> None:
+        enabled = self.save_profile_checkbox.isChecked()
+        self.profile_name_edit.setEnabled(enabled)
+        self.save_password_checkbox.setEnabled(enabled and self.selected_auth_mode() == "credentials")
 
 
 class OptionsDialog(QDialog):
@@ -1560,8 +1845,54 @@ class OptionsDialog(QDialog):
         self.auto_connect_combo.setEnabled(not using_credentials)
 
 
+def build_acl_viewer_tab(ldap: LdapManager, object_dn: str) -> QWidget:
+    tab = QWidget()
+    layout = QVBoxLayout(tab)
+
+    details = ldap.get_security_descriptor_details(object_dn)
+    if details.get("error"):
+        layout.addWidget(QLabel(f"Security descriptor unavailable: {details['error']}"))
+        return tab
+
+    summary = QFormLayout()
+    summary.addRow("Owner SID:", QLabel(str(details.get("owner_sid", ""))))
+    summary.addRow("Primary Group SID:", QLabel(str(details.get("group_sid", ""))))
+    summary.addRow("Raw length:", QLabel(str(details.get("length", 0))))
+    layout.addLayout(summary)
+
+    acl_table = QTableWidget()
+    acl_table.setColumnCount(4)
+    acl_table.setHorizontalHeaderLabels(["Type", "Flags", "Access Mask", "Trustee SID"])
+    acl_table.setEditTriggers(QTableWidget.NoEditTriggers)
+    acl_table.setSelectionMode(QTableWidget.NoSelection)
+    acl_table.verticalHeader().setVisible(False)
+    acl_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+    acl_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+    acl_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+    acl_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+
+    dacl = details.get("dacl", [])
+    acl_table.setRowCount(len(dacl))
+    for row, ace in enumerate(dacl):
+        acl_table.setItem(row, 0, QTableWidgetItem(str(ace.get("type", ""))))
+        acl_table.setItem(row, 1, QTableWidgetItem(str(ace.get("flags", ""))))
+        acl_table.setItem(row, 2, QTableWidgetItem(str(ace.get("mask", ""))))
+        acl_table.setItem(row, 3, QTableWidgetItem(str(ace.get("trustee_sid", ""))))
+
+    layout.addWidget(acl_table)
+
+    raw_sd = QTextEdit()
+    raw_sd.setReadOnly(True)
+    raw_sd.setPlainText(str(details.get("base64", "")))
+    raw_sd.setPlaceholderText("Base64-encoded nTSecurityDescriptor")
+    layout.addWidget(QLabel("Raw security descriptor (base64):"))
+    layout.addWidget(raw_sd)
+
+    return tab
+
+
 class PropertiesDialog(QDialog):
-    def __init__(self, obj: LdapObject, attrs: dict[str, list[str]], parent=None) -> None:
+    def __init__(self, ldap: LdapManager, obj: LdapObject, attrs: dict[str, list[str]], parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(obj.name)
         self.resize(800, 600)
@@ -1595,6 +1926,7 @@ class PropertiesDialog(QDialog):
         attributes_layout.addWidget(text)
 
         tabs.addTab(attributes_tab, "Attributes")
+        tabs.addTab(build_acl_viewer_tab(ldap, obj.dn), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -1670,6 +2002,7 @@ class ComputerPropertiesDialog(QDialog):
         tabs.addTab(self.build_location_tab(attrs), "Location")
         tabs.addTab(self.build_managed_by_tab(attrs), "Managed By")
         tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -2406,6 +2739,7 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
         tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, obj.dn), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3153,10 +3487,7 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
 
-        security_tab = QWidget()
-        security_layout = QVBoxLayout(security_tab)
-        security_layout.addWidget(QLabel("Security editor not implemented yet."))
-        tabs.addTab(security_tab, "Security")
+        tabs.addTab(build_acl_viewer_tab(self.ldap, group_obj.dn), "Security")
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
         buttons.accepted.connect(self.on_ok)
@@ -3750,6 +4081,8 @@ class MainWindow(QMainWindow):
         self.saved_host = ""
         self.saved_port = 636
         self.auto_connect = False
+        self.connection_profiles: list[ConnectionProfile] = []
+        self.active_profile_name = ""
         self.last_bind_user = ""
         self.last_bind_password = ""
         self.connection_alert_shown = False
@@ -4037,7 +4370,34 @@ class MainWindow(QMainWindow):
         self.saved_host = str(data.get("host", ""))
         self.saved_port = int(data.get("port", 636))
         self.auto_connect = bool(data.get("auto_connect", False))
+        self.active_profile_name = str(data.get("active_profile", ""))
         self.show_advanced_features = bool(data.get("show_advanced_features", True))
+
+        self.connection_profiles = []
+        profile_items = data.get("connection_profiles", [])
+        if isinstance(profile_items, list):
+            for profile in profile_items:
+                if not isinstance(profile, dict):
+                    continue
+                name = str(profile.get("name", "")).strip()
+                host = str(profile.get("host", "")).strip()
+                if not name or not host:
+                    continue
+                try:
+                    port = int(profile.get("port", 636))
+                except (TypeError, ValueError):
+                    port = 636
+                auth_mode = str(profile.get("auth_mode", "credentials"))
+                bind_user = str(profile.get("bind_user", ""))
+                self.connection_profiles.append(
+                    ConnectionProfile(name=name, host=host, port=port, auth_mode=auth_mode, bind_user=bind_user)
+                )
+
+        active_profile = self.find_connection_profile(self.active_profile_name)
+        if active_profile is not None:
+            self.auth_mode = active_profile.auth_mode
+            self.saved_host = active_profile.host
+            self.saved_port = active_profile.port
 
         widths = data.get("main_table_column_widths", [])
         if isinstance(widths, list):
@@ -4075,6 +4435,17 @@ class MainWindow(QMainWindow):
             "port": self.saved_port,
             "auto_connect": self.auto_connect,
             "show_advanced_features": self.show_advanced_features,
+            "active_profile": self.active_profile_name,
+            "connection_profiles": [
+                {
+                    "name": profile.name,
+                    "host": profile.host,
+                    "port": profile.port,
+                    "auth_mode": profile.auth_mode,
+                    "bind_user": profile.bind_user,
+                }
+                for profile in self.connection_profiles
+            ],
             "main_table_column_widths": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
             "window_width": self.width(),
             "window_height": self.height(),
@@ -4082,6 +4453,15 @@ class MainWindow(QMainWindow):
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+    def find_connection_profile(self, profile_name: str) -> Optional[ConnectionProfile]:
+        target = profile_name.strip()
+        if not target:
+            return None
+        for profile in self.connection_profiles:
+            if profile.name == target:
+                return profile
+        return None
 
     def apply_saved_main_table_widths(self) -> None:
         if not self.main_table_column_widths:
@@ -4106,14 +4486,28 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def auto_connect_if_configured(self) -> None:
-        if self.auth_mode != "kerberos":
+        if not self.saved_host:
             return
 
         try:
             def connect_and_load() -> None:
-                self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
-                self.last_bind_user = ""
-                self.last_bind_password = ""
+                if self.auth_mode == "kerberos":
+                    self.ldap.connect_kerberos(self.saved_host, port=self.saved_port)
+                    self.last_bind_user = ""
+                    self.last_bind_password = ""
+                else:
+                    bind_user = self.last_bind_user
+                    bind_password = self.last_bind_password
+                    if self.active_profile_name:
+                        profile = self.find_connection_profile(self.active_profile_name)
+                        if profile is not None:
+                            bind_user = profile.bind_user
+                            bind_password = CredentialStore.get_password(profile.name)
+                    if not bind_user or not bind_password:
+                        raise ValueError("Saved credentials are not available for auto-connect.")
+                    self.ldap.connect_simple(self.saved_host, bind_user, bind_password, port=self.saved_port)
+                    self.last_bind_user = bind_user
+                    self.last_bind_password = bind_password
                 self.reset_connection_alert()
 
                 self.populate_roots()
@@ -4134,11 +4528,19 @@ class MainWindow(QMainWindow):
         self.save_settings()
 
     def show_connect_dialog(self) -> None:
-        dlg = ConnectDialog(self.auth_mode, self.saved_host, self.saved_port, self)
+        dlg = ConnectDialog(
+            self.auth_mode,
+            self.saved_host,
+            self.saved_port,
+            profiles=self.connection_profiles,
+            selected_profile=self.active_profile_name,
+            parent=self,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
 
         host, port, bind_user, password = dlg.values()
+        self.auth_mode = dlg.selected_auth_mode()
 
         try:
             if self.auth_mode == "kerberos":
@@ -4155,6 +4557,33 @@ class MainWindow(QMainWindow):
 
         self.saved_host = host
         self.saved_port = port
+
+        if dlg.save_profile_enabled():
+            profile_name = dlg.selected_profile_name()
+            if profile_name:
+                existing = self.find_connection_profile(profile_name)
+                if existing is None:
+                    self.connection_profiles.append(
+                        ConnectionProfile(
+                            name=profile_name,
+                            host=host,
+                            port=port,
+                            auth_mode=self.auth_mode,
+                            bind_user=bind_user,
+                        )
+                    )
+                else:
+                    existing.host = host
+                    existing.port = port
+                    existing.auth_mode = self.auth_mode
+                    existing.bind_user = bind_user
+
+                self.active_profile_name = profile_name
+                if dlg.save_password_enabled() and password:
+                    CredentialStore.set_password(profile_name, password)
+                else:
+                    CredentialStore.delete_password(profile_name)
+
         self.reset_connection_alert()
         self.save_settings()
         self.populate_roots()
@@ -4377,7 +4806,7 @@ class MainWindow(QMainWindow):
         elif obj.object_type == "Computer" and search_base:
             dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
         else:
-            dlg = PropertiesDialog(obj, attrs, self)
+            dlg = PropertiesDialog(self.ldap, obj, attrs, self)
         dlg.exec()
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
