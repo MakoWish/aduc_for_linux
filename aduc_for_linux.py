@@ -3956,11 +3956,13 @@ class UserPropertiesDialog(QDialog):
         for attr_name in sorted(attrs, key=str.lower):
             self.attributes_list.addItem(attr_name)
         self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
+        self.attributes_list.itemDoubleClicked.connect(self.on_attribute_double_clicked)
+        self.attributes_list.itemActivated.connect(self.on_attribute_double_clicked)
 
         right_col = QVBoxLayout()
         self.attribute_name_label = QLabel("Select an attribute")
         self.attribute_value_edit = QTextEdit()
-        self.attribute_value_edit.textChanged.connect(self.on_attribute_text_changed)
+        self.attribute_value_edit.setReadOnly(True)
         right_col.addWidget(self.attribute_name_label)
         right_col.addWidget(self.attribute_value_edit)
 
@@ -3986,12 +3988,64 @@ class UserPropertiesDialog(QDialog):
         values = self.attribute_values.get(attr_name, [])
         is_read_only = attr_name in self.NON_EDITABLE_ATTRIBUTES
         self.attribute_name_label.setText(
-            f"{attr_name} {'(read-only)' if is_read_only else '(editable, one value per line)'}"
+            f"{attr_name} {'(read-only)' if is_read_only else '(double-click to edit)'}"
         )
         self.loading_attribute_text = True
         self.attribute_value_edit.setPlainText("\n".join(values))
         self.loading_attribute_text = False
-        self.attribute_value_edit.setReadOnly(is_read_only)
+        self.attribute_value_edit.setReadOnly(True)
+
+    def _is_attribute_integer(self, attr_name: str, values: list[str]) -> bool:
+        schema_info = self.ldap.get_attribute_schema_info(attr_name)
+        if schema_info.get("is_integer") is True:
+            return True
+        if schema_info.get("is_integer") is False:
+            return False
+        if not values:
+            return False
+        try:
+            int(values[0])
+            return True
+        except ValueError:
+            return False
+
+    def _is_attribute_multi_valued(self, attr_name: str, values: list[str]) -> bool:
+        schema_info = self.ldap.get_attribute_schema_info(attr_name)
+        if schema_info.get("single_valued") is False:
+            return True
+        if schema_info.get("single_valued") is True:
+            return False
+        return len(values) > 1 or attr_name.lower() in {"serviceprincipalname"}
+
+    def on_attribute_double_clicked(self, item: QListWidgetItem) -> None:
+        attr_name = item.text().strip()
+        if not attr_name or attr_name in self.NON_EDITABLE_ATTRIBUTES:
+            return
+
+        current_values = list(self.attribute_values.get(attr_name, []))
+        if self._is_attribute_multi_valued(attr_name, current_values):
+            editor = MultiValuedStringEditorDialog(attr_name, current_values, self)
+            if editor.exec() != QDialog.Accepted:
+                return
+            new_values = editor.edited_values()
+        else:
+            is_integer = self._is_attribute_integer(attr_name, current_values)
+            editor_title = "Integer Attribute Editor" if is_integer else "String Attribute Editor"
+            editor = SingleValueAttributeEditorDialog(editor_title, current_values[0] if current_values else "", self)
+            if editor.exec() != QDialog.Accepted:
+                return
+            new_value = editor.edited_value()
+            if is_integer and new_value:
+                try:
+                    int(new_value)
+                except ValueError:
+                    QMessageBox.warning(self, "Invalid value", "Please enter a valid integer value.")
+                    return
+            new_values = [new_value] if new_value else []
+
+        self.attribute_values[attr_name] = new_values
+        self.on_attribute_selected(attr_name)
+        self.refresh_apply_button_state()
 
     def on_attribute_text_changed(self) -> None:
         if self.loading_attribute_text or not self.selected_attribute or not self.attribute_value_edit:
