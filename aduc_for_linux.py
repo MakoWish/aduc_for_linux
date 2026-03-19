@@ -658,6 +658,7 @@ class LdapManager:
         self.conn: Optional[Connection] = None
         self.page_size = 500
         self._attribute_schema_cache: dict[str, dict[str, Any]] = {}
+        self._class_attribute_cache: dict[str, set[str]] = {}
 
     def _paged_search_entries(
         self,
@@ -716,6 +717,7 @@ class LdapManager:
             raise_exceptions=True,
         )
         self._attribute_schema_cache.clear()
+        self._class_attribute_cache.clear()
 
     def connect_kerberos(self, host: str, port: int = 636) -> None:
         tls = Tls(validate=ssl.CERT_REQUIRED)
@@ -732,11 +734,13 @@ class LdapManager:
         if supports_session_security:
             self.conn = Connection(self.server, session_security=encrypt_value, **kwargs)
             self._attribute_schema_cache.clear()
+            self._class_attribute_cache.clear()
             return
 
         try:
             self.conn = Connection(self.server, **kwargs)
             self._attribute_schema_cache.clear()
+            self._class_attribute_cache.clear()
         except Exception as e:
             message = str(e)
             if "Sign or Seal are required" in message:
@@ -1030,6 +1034,55 @@ class LdapManager:
         info = {"single_valued": single_valued, "is_integer": is_integer}
         self._attribute_schema_cache[cache_key] = dict(info)
         return dict(info)
+
+    def get_possible_attributes_for_object_classes(self, object_classes: list[str]) -> list[str]:
+        if not self.conn:
+            return []
+
+        partitions = self.get_directory_partitions()
+        schema_nc = partitions.get("schema_naming_context")
+        if not isinstance(schema_nc, str) or not schema_nc.strip():
+            return []
+
+        possible_attrs: set[str] = set()
+        for class_name in object_classes:
+            normalized = str(class_name).strip().lower()
+            if not normalized:
+                continue
+
+            if normalized in self._class_attribute_cache:
+                possible_attrs.update(self._class_attribute_cache[normalized])
+                continue
+
+            escaped_class = ldap3.utils.conv.escape_filter_chars(normalized)
+            search_filter = f"(&(objectClass=classSchema)(lDAPDisplayName={escaped_class}))"
+            class_attrs: set[str] = set()
+
+            try:
+                self.conn.search(
+                    search_base=schema_nc,
+                    search_filter=search_filter,
+                    search_scope=SUBTREE,
+                    attributes=["mayContain", "mustContain", "systemMayContain", "systemMustContain"],
+                    size_limit=1,
+                )
+            except Exception:
+                self._class_attribute_cache[normalized] = set()
+                continue
+
+            if self.conn.entries:
+                entry = self.conn.entries[0]
+                for field in ("mayContain", "mustContain", "systemMayContain", "systemMustContain"):
+                    values = self._entry_attr_values(entry, field)
+                    for value in values:
+                        attr_name = str(value).strip()
+                        if attr_name:
+                            class_attrs.add(attr_name)
+
+            self._class_attribute_cache[normalized] = set(class_attrs)
+            possible_attrs.update(class_attrs)
+
+        return sorted(possible_attrs, key=str.lower)
 
     def get_security_descriptor_details(self, dn: str) -> dict[str, Any]:
         if not self.conn:
@@ -6009,6 +6062,10 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             attrs = self.ldap.get_object_attributes(obj.dn)
+            if obj.object_type in {"Group", "User", "Computer"}:
+                possible_attrs = self.ldap.get_possible_attributes_for_object_classes(obj.object_classes)
+                for attr_name in possible_attrs:
+                    attrs.setdefault(attr_name, [])
 
             search_base = self.current_dn
             if not search_base:
