@@ -2601,11 +2601,11 @@ class SingleValueAttributeEditorDialog(QDialog):
     def __init__(self, title: str, value: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(500, 180)
+        self.resize(500, 140)
 
         layout = QVBoxLayout(self)
-        self.value_edit = QTextEdit()
-        self.value_edit.setPlainText(value)
+        self.value_edit = QLineEdit()
+        self.value_edit.setText(value)
         layout.addWidget(self.value_edit)
 
         button_row = QHBoxLayout()
@@ -2621,7 +2621,7 @@ class SingleValueAttributeEditorDialog(QDialog):
         layout.addWidget(buttons)
 
     def edited_value(self) -> str:
-        return self.value_edit.toPlainText().strip()
+        return self.value_edit.text().strip()
 
 
 class MultiValuedStringEditorDialog(QDialog):
@@ -3957,7 +3957,6 @@ class UserPropertiesDialog(QDialog):
             self.attributes_list.addItem(attr_name)
         self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
         self.attributes_list.itemDoubleClicked.connect(self.on_attribute_double_clicked)
-        self.attributes_list.itemActivated.connect(self.on_attribute_double_clicked)
 
         right_col = QVBoxLayout()
         self.attribute_name_label = QLabel("Select an attribute")
@@ -4324,6 +4323,19 @@ class SelectDirectoryObjectsDialog(QDialog):
 
 
 class GroupPropertiesDialog(QDialog):
+    NON_EDITABLE_ATTRIBUTES = {
+        "distinguishedName",
+        "objectClass",
+        "objectGUID",
+        "objectSid",
+        "whenCreated",
+        "whenChanged",
+        "uSNCreated",
+        "uSNChanged",
+        "memberOf",
+        "member",
+    }
+
     def __init__(self, ldap: LdapManager, group_obj: LdapObject, attrs: dict[str, list[str]], search_base: str, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(group_obj.name)
@@ -4337,6 +4349,11 @@ class GroupPropertiesDialog(QDialog):
         self.original_description = attrs.get("description", [""])[0]
         self.original_email = attrs.get("mail", [""])[0]
         self.original_managed_by = attrs.get("managedBy", [""])[0]
+        self.original_attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
+        self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
+        self.selected_attribute: Optional[str] = None
+        self.attribute_name_label: Optional[QLabel] = None
+        self.attribute_value_edit: Optional[QTextEdit] = None
         self.apply_button: Optional[QPushButton] = None
 
         tabs = QTabWidget()
@@ -4401,6 +4418,7 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Created:", QLabel(created))
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
+        tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
 
         self.security_editor = build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base, show_apply_button=False)
         self.security_editor.changed.connect(self.refresh_apply_button_state)
@@ -4519,6 +4537,11 @@ class GroupPropertiesDialog(QDialog):
             return True
         if self.current_member_dns() != self.original_member_dns:
             return True
+        for attr_name in self.attribute_values:
+            current_values = self.attribute_values.get(attr_name, [])
+            original_values = self.original_attribute_values.get(attr_name, [])
+            if current_values != original_values:
+                return True
         if self.security_editor.has_pending_changes():
             return True
         return False
@@ -4556,6 +4579,8 @@ class GroupPropertiesDialog(QDialog):
                     self.ldap.replace_group_members(self.group_obj.dn, member_dns)
                     self.original_member_dns = member_dns
 
+                self.apply_attribute_changes()
+
                 current_item = self.security_editor.principal_list.currentItem()
                 selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
                 if not self.security_editor.apply_security_changes(reload_after_save=False):
@@ -4571,6 +4596,112 @@ class GroupPropertiesDialog(QDialog):
     def on_ok(self) -> None:
         if self.apply_changes():
             self.accept()
+
+    def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        editor_layout = QHBoxLayout()
+        self.attributes_list = QListWidget()
+        for attr_name in sorted(attrs, key=str.lower):
+            self.attributes_list.addItem(attr_name)
+        self.attributes_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
+        self.attributes_list.itemDoubleClicked.connect(self.on_attribute_double_clicked)
+
+        right_col = QVBoxLayout()
+        self.attribute_name_label = QLabel("Select an attribute")
+        self.attribute_value_edit = QTextEdit()
+        self.attribute_value_edit.setReadOnly(True)
+        right_col.addWidget(self.attribute_name_label)
+        right_col.addWidget(self.attribute_value_edit)
+
+        editor_layout.addWidget(self.attributes_list, 1)
+        editor_layout.addLayout(right_col, 2)
+        layout.addLayout(editor_layout)
+
+        if self.attributes_list.count() > 0:
+            self.attributes_list.setCurrentRow(0)
+        return tab
+
+    def on_attribute_selected(self, attr_name: str) -> None:
+        self.selected_attribute = attr_name if attr_name else None
+        if not self.attribute_name_label or not self.attribute_value_edit:
+            return
+
+        if not attr_name:
+            self.attribute_name_label.setText("Select an attribute")
+            self.attribute_value_edit.clear()
+            return
+
+        values = self.attribute_values.get(attr_name, [])
+        is_read_only = attr_name in self.NON_EDITABLE_ATTRIBUTES
+        status = "(read-only)" if is_read_only else "(double-click to edit)"
+        self.attribute_name_label.setText(f"{attr_name} {status}")
+        self.attribute_value_edit.setPlainText("\n".join(values))
+
+    def _is_attribute_integer(self, attr_name: str, values: list[str]) -> bool:
+        schema_info = self.ldap.get_attribute_schema_info(attr_name)
+        if schema_info.get("is_integer") is True:
+            return True
+        if schema_info.get("is_integer") is False:
+            return False
+        if not values:
+            return False
+        try:
+            int(values[0])
+            return True
+        except ValueError:
+            return False
+
+    def _is_attribute_multi_valued(self, attr_name: str, values: list[str]) -> bool:
+        schema_info = self.ldap.get_attribute_schema_info(attr_name)
+        if schema_info.get("single_valued") is False:
+            return True
+        if schema_info.get("single_valued") is True:
+            return False
+        return len(values) > 1 or attr_name.lower() in {"serviceprincipalname"}
+
+    def on_attribute_double_clicked(self, item: QListWidgetItem) -> None:
+        attr_name = item.text().strip()
+        if not attr_name or attr_name in self.NON_EDITABLE_ATTRIBUTES:
+            return
+
+        current_values = list(self.attribute_values.get(attr_name, []))
+        if self._is_attribute_multi_valued(attr_name, current_values):
+            editor = MultiValuedStringEditorDialog(attr_name, current_values, self)
+            if editor.exec() != QDialog.Accepted:
+                return
+            new_values = editor.edited_values()
+        else:
+            is_integer = self._is_attribute_integer(attr_name, current_values)
+            title = "Integer Attribute Editor" if is_integer else "String Attribute Editor"
+            editor = SingleValueAttributeEditorDialog(title, current_values[0] if current_values else "", self)
+            if editor.exec() != QDialog.Accepted:
+                return
+            new_value = editor.edited_value()
+            if is_integer and new_value:
+                try:
+                    int(new_value)
+                except ValueError:
+                    QMessageBox.warning(self, "Invalid value", "Please enter a valid integer value.")
+                    return
+            new_values = [new_value] if new_value else []
+
+        self.attribute_values[attr_name] = new_values
+        self.on_attribute_selected(attr_name)
+        self.refresh_apply_button_state()
+
+    def apply_attribute_changes(self) -> None:
+        for attr_name in sorted(self.attribute_values):
+            if attr_name in self.NON_EDITABLE_ATTRIBUTES:
+                continue
+            current_values = self.attribute_values.get(attr_name, [])
+            original_values = self.original_attribute_values.get(attr_name, [])
+            if current_values == original_values:
+                continue
+            self.ldap.replace_object_attribute_values(self.group_obj.dn, attr_name, current_values)
+            self.original_attribute_values[attr_name] = list(current_values)
 
 
 class DirectoryTableWidget(QTableWidget):
