@@ -3028,9 +3028,11 @@ class ComputerPropertiesDialog(QDialog):
 
         values = self.attribute_values.get(attr_name, [])
         is_read_only = attr_name in self.NON_EDITABLE_ATTRIBUTES
-        self.attribute_name_label.setText(
-            f"{attr_name} {'(read-only)' if is_read_only else '(editable in AD)'}"
-        )
+        if is_read_only:
+            status = "(read-only)"
+        else:
+            status = "(editable in AD, read-only in this app)"
+        self.attribute_name_label.setText(f"{attr_name} {status}")
         self.attribute_value_edit.setPlainText("\n".join(values))
 
     def _current_member_of_dns(self, include_primary: bool = False) -> list[str]:
