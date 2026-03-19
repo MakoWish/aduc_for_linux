@@ -3628,7 +3628,7 @@ class UserPropertiesDialog(QDialog):
         tabs.addTab(self.build_profile_tab(attrs), "Profile")
         tabs.addTab(self.build_member_of_tab(attrs), "Member Of")
         tabs.addTab(self.build_object_tab(obj, attrs), "Object")
-        tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
+        tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
         self.security_editor = build_acl_viewer_tab(self.ldap, obj.dn, self.search_base, show_apply_button=False)
         self.security_editor.changed.connect(self.refresh_apply_button_state)
         tabs.addTab(self.security_editor, "Security")
@@ -4509,7 +4509,7 @@ class GroupPropertiesDialog(QDialog):
         object_layout.addRow("Created:", QLabel(created))
         object_layout.addRow("Modified:", QLabel(modified))
         tabs.addTab(object_tab, "Object")
-        tabs.addTab(self.build_attributes_tab(attrs), "Attribute Editor")
+        tabs.addTab(self.build_attributes_tab(attrs), "Attributes")
 
         self.security_editor = build_acl_viewer_tab(self.ldap, group_obj.dn, self.search_base, show_apply_button=False)
         self.security_editor.changed.connect(self.refresh_apply_button_state)
@@ -6017,12 +6017,14 @@ class MainWindow(QMainWindow):
                     data = top.data(0, Qt.UserRole) or {}
                     search_base = data.get("dn")
 
-            if obj.object_type == "Group" and search_base:
+            effective_search_base = search_base or obj.dn
+
+            if obj.object_type == "Group":
                 dlg = GroupPropertiesDialog(
                     self.ldap,
                     obj,
                     attrs,
-                    search_base,
+                    effective_search_base,
                     show_empty_attributes=self.show_empty_attributes,
                     on_toggle_show_empty_attributes=self.set_show_empty_attributes_preference,
                     parent=self,
@@ -6032,17 +6034,17 @@ class MainWindow(QMainWindow):
                     self.ldap,
                     obj,
                     attrs,
-                    search_base,
+                    effective_search_base,
                     show_empty_attributes=self.show_empty_attributes,
                     on_toggle_show_empty_attributes=self.set_show_empty_attributes_preference,
                     parent=self,
                 )
-            elif obj.object_type == "Computer" and search_base:
+            elif obj.object_type == "Computer":
                 dlg = ComputerPropertiesDialog(
                     self.ldap,
                     obj,
                     attrs,
-                    search_base,
+                    effective_search_base,
                     show_empty_attributes=self.show_empty_attributes,
                     on_toggle_show_empty_attributes=self.set_show_empty_attributes_preference,
                     parent=self,
