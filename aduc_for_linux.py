@@ -2712,6 +2712,8 @@ class ComputerPropertiesDialog(QDialog):
         obj: LdapObject,
         attrs: dict[str, list[str]],
         search_base: str,
+        show_empty_attributes: bool = False,
+        on_toggle_show_empty_attributes=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -2740,6 +2742,8 @@ class ComputerPropertiesDialog(QDialog):
         self.selected_attribute: Optional[str] = None
         self.attribute_name_label: Optional[QLabel] = None
         self.attribute_value_edit: Optional[QTextEdit] = None
+        self.show_empty_attributes = bool(show_empty_attributes)
+        self.on_toggle_show_empty_attributes = on_toggle_show_empty_attributes
 
         self.apply_button: Optional[QPushButton] = None
 
@@ -3137,11 +3141,13 @@ class ComputerPropertiesDialog(QDialog):
     def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        self.show_empty_attributes_checkbox = QCheckBox("Show attributes with no values")
+        self.show_empty_attributes_checkbox.setChecked(self.show_empty_attributes)
+        self.show_empty_attributes_checkbox.toggled.connect(self.on_show_empty_attributes_toggled)
+        layout.addWidget(self.show_empty_attributes_checkbox)
 
         editor_layout = QHBoxLayout()
         self.attributes_list = QListWidget()
-        for attr_name in sorted(attrs, key=str.lower):
-            self.attributes_list.addItem(attr_name)
         self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
         self.attributes_list.itemDoubleClicked.connect(self.on_attribute_double_clicked)
 
@@ -3156,9 +3162,43 @@ class ComputerPropertiesDialog(QDialog):
         editor_layout.addLayout(right_col, 2)
         layout.addLayout(editor_layout)
 
-        if self.attributes_list.count() > 0:
-            self.attributes_list.setCurrentRow(0)
+        self.refresh_attributes_list()
         return tab
+
+    def _attribute_has_values(self, attr_name: str) -> bool:
+        values = self.attribute_values.get(attr_name, [])
+        return any(v.strip() for v in values)
+
+    def refresh_attributes_list(self, preferred_attr: Optional[str] = None) -> None:
+        current_attr = preferred_attr if preferred_attr is not None else self.attributes_list.currentItem().text() if self.attributes_list.currentItem() else ""
+        visible_attrs = [
+            attr_name
+            for attr_name in sorted(self.attribute_values, key=str.lower)
+            if self.show_empty_attributes or self._attribute_has_values(attr_name)
+        ]
+        self.attributes_list.blockSignals(True)
+        self.attributes_list.clear()
+        for attr_name in visible_attrs:
+            self.attributes_list.addItem(attr_name)
+        self.attributes_list.blockSignals(False)
+
+        if not visible_attrs:
+            self.selected_attribute = None
+            self.on_attribute_selected("")
+            return
+
+        target_attr = current_attr if current_attr in visible_attrs else visible_attrs[0]
+        for idx in range(self.attributes_list.count()):
+            if self.attributes_list.item(idx).text() == target_attr:
+                self.attributes_list.setCurrentRow(idx)
+                break
+        self.on_attribute_selected(target_attr)
+
+    def on_show_empty_attributes_toggled(self, checked: bool) -> None:
+        self.show_empty_attributes = checked
+        if callable(self.on_toggle_show_empty_attributes):
+            self.on_toggle_show_empty_attributes(checked)
+        self.refresh_attributes_list()
 
     def on_attribute_selected(self, attr_name: str) -> None:
         if not self.attribute_name_label or not self.attribute_value_edit:
@@ -3227,7 +3267,7 @@ class ComputerPropertiesDialog(QDialog):
             new_values = [new_value] if new_value else []
 
         self.attribute_values[attr_name] = new_values
-        self.on_attribute_selected(attr_name)
+        self.refresh_attributes_list(preferred_attr=attr_name)
         self.refresh_apply_button_state()
 
     def _current_member_of_dns(self, include_primary: bool = False) -> list[str]:
@@ -3556,6 +3596,8 @@ class UserPropertiesDialog(QDialog):
         obj: LdapObject,
         attrs: dict[str, list[str]],
         search_base: str,
+        show_empty_attributes: bool = False,
+        on_toggle_show_empty_attributes=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -3575,6 +3617,8 @@ class UserPropertiesDialog(QDialog):
         self.loading_attribute_text = False
         self.attribute_name_label: Optional[QLabel] = None
         self.attribute_value_edit: Optional[QTextEdit] = None
+        self.show_empty_attributes = bool(show_empty_attributes)
+        self.on_toggle_show_empty_attributes = on_toggle_show_empty_attributes
         self.apply_button: Optional[QPushButton] = None
 
         tabs = QTabWidget()
@@ -3950,11 +3994,13 @@ class UserPropertiesDialog(QDialog):
     def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        self.show_empty_attributes_checkbox = QCheckBox("Show attributes with no values")
+        self.show_empty_attributes_checkbox.setChecked(self.show_empty_attributes)
+        self.show_empty_attributes_checkbox.toggled.connect(self.on_show_empty_attributes_toggled)
+        layout.addWidget(self.show_empty_attributes_checkbox)
 
         editor_layout = QHBoxLayout()
         self.attributes_list = QListWidget()
-        for attr_name in sorted(attrs, key=str.lower):
-            self.attributes_list.addItem(attr_name)
         self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
         self.attributes_list.itemDoubleClicked.connect(self.on_attribute_double_clicked)
 
@@ -3969,9 +4015,43 @@ class UserPropertiesDialog(QDialog):
         editor_layout.addLayout(right_col, 2)
         layout.addLayout(editor_layout)
 
-        if self.attributes_list.count() > 0:
-            self.attributes_list.setCurrentRow(0)
+        self.refresh_attributes_list()
         return tab
+
+    def _attribute_has_values(self, attr_name: str) -> bool:
+        values = self.attribute_values.get(attr_name, [])
+        return any(v.strip() for v in values)
+
+    def refresh_attributes_list(self, preferred_attr: Optional[str] = None) -> None:
+        current_attr = preferred_attr if preferred_attr is not None else self.attributes_list.currentItem().text() if self.attributes_list.currentItem() else ""
+        visible_attrs = [
+            attr_name
+            for attr_name in sorted(self.attribute_values, key=str.lower)
+            if self.show_empty_attributes or self._attribute_has_values(attr_name)
+        ]
+        self.attributes_list.blockSignals(True)
+        self.attributes_list.clear()
+        for attr_name in visible_attrs:
+            self.attributes_list.addItem(attr_name)
+        self.attributes_list.blockSignals(False)
+
+        if not visible_attrs:
+            self.selected_attribute = None
+            self.on_attribute_selected("")
+            return
+
+        target_attr = current_attr if current_attr in visible_attrs else visible_attrs[0]
+        for idx in range(self.attributes_list.count()):
+            if self.attributes_list.item(idx).text() == target_attr:
+                self.attributes_list.setCurrentRow(idx)
+                break
+        self.on_attribute_selected(target_attr)
+
+    def on_show_empty_attributes_toggled(self, checked: bool) -> None:
+        self.show_empty_attributes = checked
+        if callable(self.on_toggle_show_empty_attributes):
+            self.on_toggle_show_empty_attributes(checked)
+        self.refresh_attributes_list()
 
     def on_attribute_selected(self, attr_name: str) -> None:
         self.selected_attribute = attr_name if attr_name else None
@@ -4043,7 +4123,7 @@ class UserPropertiesDialog(QDialog):
             new_values = [new_value] if new_value else []
 
         self.attribute_values[attr_name] = new_values
-        self.on_attribute_selected(attr_name)
+        self.refresh_attributes_list(preferred_attr=attr_name)
         self.refresh_apply_button_state()
 
     def on_attribute_text_changed(self) -> None:
@@ -4336,7 +4416,16 @@ class GroupPropertiesDialog(QDialog):
         "member",
     }
 
-    def __init__(self, ldap: LdapManager, group_obj: LdapObject, attrs: dict[str, list[str]], search_base: str, parent=None) -> None:
+    def __init__(
+        self,
+        ldap: LdapManager,
+        group_obj: LdapObject,
+        attrs: dict[str, list[str]],
+        search_base: str,
+        show_empty_attributes: bool = False,
+        on_toggle_show_empty_attributes=None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(group_obj.name)
         self.resize(900, 600)
@@ -4354,6 +4443,8 @@ class GroupPropertiesDialog(QDialog):
         self.selected_attribute: Optional[str] = None
         self.attribute_name_label: Optional[QLabel] = None
         self.attribute_value_edit: Optional[QTextEdit] = None
+        self.show_empty_attributes = bool(show_empty_attributes)
+        self.on_toggle_show_empty_attributes = on_toggle_show_empty_attributes
         self.apply_button: Optional[QPushButton] = None
 
         tabs = QTabWidget()
@@ -4600,11 +4691,13 @@ class GroupPropertiesDialog(QDialog):
     def build_attributes_tab(self, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        self.show_empty_attributes_checkbox = QCheckBox("Show attributes with no values")
+        self.show_empty_attributes_checkbox.setChecked(self.show_empty_attributes)
+        self.show_empty_attributes_checkbox.toggled.connect(self.on_show_empty_attributes_toggled)
+        layout.addWidget(self.show_empty_attributes_checkbox)
 
         editor_layout = QHBoxLayout()
         self.attributes_list = QListWidget()
-        for attr_name in sorted(attrs, key=str.lower):
-            self.attributes_list.addItem(attr_name)
         self.attributes_list.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.attributes_list.currentTextChanged.connect(self.on_attribute_selected)
         self.attributes_list.itemDoubleClicked.connect(self.on_attribute_double_clicked)
@@ -4620,9 +4713,43 @@ class GroupPropertiesDialog(QDialog):
         editor_layout.addLayout(right_col, 2)
         layout.addLayout(editor_layout)
 
-        if self.attributes_list.count() > 0:
-            self.attributes_list.setCurrentRow(0)
+        self.refresh_attributes_list()
         return tab
+
+    def _attribute_has_values(self, attr_name: str) -> bool:
+        values = self.attribute_values.get(attr_name, [])
+        return any(v.strip() for v in values)
+
+    def refresh_attributes_list(self, preferred_attr: Optional[str] = None) -> None:
+        current_attr = preferred_attr if preferred_attr is not None else self.attributes_list.currentItem().text() if self.attributes_list.currentItem() else ""
+        visible_attrs = [
+            attr_name
+            for attr_name in sorted(self.attribute_values, key=str.lower)
+            if self.show_empty_attributes or self._attribute_has_values(attr_name)
+        ]
+        self.attributes_list.blockSignals(True)
+        self.attributes_list.clear()
+        for attr_name in visible_attrs:
+            self.attributes_list.addItem(attr_name)
+        self.attributes_list.blockSignals(False)
+
+        if not visible_attrs:
+            self.selected_attribute = None
+            self.on_attribute_selected("")
+            return
+
+        target_attr = current_attr if current_attr in visible_attrs else visible_attrs[0]
+        for idx in range(self.attributes_list.count()):
+            if self.attributes_list.item(idx).text() == target_attr:
+                self.attributes_list.setCurrentRow(idx)
+                break
+        self.on_attribute_selected(target_attr)
+
+    def on_show_empty_attributes_toggled(self, checked: bool) -> None:
+        self.show_empty_attributes = checked
+        if callable(self.on_toggle_show_empty_attributes):
+            self.on_toggle_show_empty_attributes(checked)
+        self.refresh_attributes_list()
 
     def on_attribute_selected(self, attr_name: str) -> None:
         self.selected_attribute = attr_name if attr_name else None
@@ -4689,7 +4816,7 @@ class GroupPropertiesDialog(QDialog):
             new_values = [new_value] if new_value else []
 
         self.attribute_values[attr_name] = new_values
-        self.on_attribute_selected(attr_name)
+        self.refresh_attributes_list(preferred_attr=attr_name)
         self.refresh_apply_button_state()
 
     def apply_attribute_changes(self) -> None:
@@ -5147,6 +5274,7 @@ class MainWindow(QMainWindow):
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
         self.show_advanced_features = True
+        self.show_empty_attributes = False
         self.current_dn: Optional[str] = None
         self.pending_auto_connect = False
         self._move_thread: Optional[QThread] = None
@@ -5425,6 +5553,7 @@ class MainWindow(QMainWindow):
         self.auto_connect = bool(data.get("auto_connect", False))
         self.active_profile_name = str(data.get("active_profile", ""))
         self.show_advanced_features = bool(data.get("show_advanced_features", True))
+        self.show_empty_attributes = bool(data.get("show_empty_attributes", False))
 
         self.connection_profiles = []
         profile_items = data.get("connection_profiles", [])
@@ -5496,6 +5625,7 @@ class MainWindow(QMainWindow):
             "port": self.saved_port,
             "auto_connect": self.auto_connect,
             "show_advanced_features": self.show_advanced_features,
+            "show_empty_attributes": self.show_empty_attributes,
             "active_profile": self.active_profile_name,
             "connection_profiles": [
                 {
@@ -5524,6 +5654,13 @@ class MainWindow(QMainWindow):
             if profile.name == target:
                 return profile
         return None
+
+    def set_show_empty_attributes_preference(self, enabled: bool) -> None:
+        enabled_bool = bool(enabled)
+        if self.show_empty_attributes == enabled_bool:
+            return
+        self.show_empty_attributes = enabled_bool
+        self.save_settings()
 
     def delete_connection_profiles(self, profile_names: list[str]) -> None:
         targets = {name.strip() for name in profile_names if name.strip()}
@@ -5881,11 +6018,35 @@ class MainWindow(QMainWindow):
                     search_base = data.get("dn")
 
             if obj.object_type == "Group" and search_base:
-                dlg = GroupPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+                dlg = GroupPropertiesDialog(
+                    self.ldap,
+                    obj,
+                    attrs,
+                    search_base,
+                    show_empty_attributes=self.show_empty_attributes,
+                    on_toggle_show_empty_attributes=self.set_show_empty_attributes_preference,
+                    parent=self,
+                )
             elif obj.object_type == "User":
-                dlg = UserPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+                dlg = UserPropertiesDialog(
+                    self.ldap,
+                    obj,
+                    attrs,
+                    search_base,
+                    show_empty_attributes=self.show_empty_attributes,
+                    on_toggle_show_empty_attributes=self.set_show_empty_attributes_preference,
+                    parent=self,
+                )
             elif obj.object_type == "Computer" and search_base:
-                dlg = ComputerPropertiesDialog(self.ldap, obj, attrs, search_base, self)
+                dlg = ComputerPropertiesDialog(
+                    self.ldap,
+                    obj,
+                    attrs,
+                    search_base,
+                    show_empty_attributes=self.show_empty_attributes,
+                    on_toggle_show_empty_attributes=self.set_show_empty_attributes_preference,
+                    parent=self,
+                )
             else:
                 dlg = PropertiesDialog(self.ldap, obj, attrs, search_base or obj.dn, self)
         except Exception as e:
