@@ -6081,6 +6081,8 @@ class MainWindow(QMainWindow):
         self.table.clearContents()
         self.populate_search_results(results)
         self.update_status_bar()
+        if not results:
+            QMessageBox.information(self, "Search", "No results found.")
 
     def open_properties(self, obj: LdapObject) -> None:
         QApplication.setOverrideCursor(Qt.WaitCursor)
