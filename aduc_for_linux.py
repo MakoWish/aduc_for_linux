@@ -1200,12 +1200,18 @@ class LdapManager:
     @staticmethod
     def _search_object_class_filter(search_mode: str) -> str:
         if search_mode == SEARCH_FILTER_COMPUTERS:
-            return "(objectClass=computer)"
+            return "(&(objectCategory=computer)(objectClass=computer))"
         if search_mode == SEARCH_FILTER_ORGANIZATIONAL_UNITS:
             return "(objectClass=organizationalUnit)"
         if search_mode == SEARCH_FILTER_GROUPS:
             return "(objectClass=group)"
-        return "(|(objectClass=user)(objectClass=group))"
+        return (
+            "(|"
+            "(&(objectCategory=person)(objectClass=user)(!(objectClass=computer)))"
+            "(objectClass=contact)"
+            "(objectClass=group)"
+            ")"
+        )
 
     def _build_search_filter(self, term: str, search_mode: str) -> str:
         safe_term = self._escape_search_term(term)
@@ -1222,6 +1228,20 @@ class LdapManager:
             ")"
             ")"
         )
+
+    @staticmethod
+    def _matches_search_mode(object_classes: list[str], search_mode: str) -> bool:
+        classes = set(object_classes)
+        if search_mode == SEARCH_FILTER_COMPUTERS:
+            return "computer" in classes
+        if search_mode == SEARCH_FILTER_ORGANIZATIONAL_UNITS:
+            return "organizationalunit" in classes
+        if search_mode == SEARCH_FILTER_GROUPS:
+            return "group" in classes
+        is_user = any(cls in classes for cls in USER_CLASSES) and "computer" not in classes
+        is_contact = "contact" in classes
+        is_group = "group" in classes
+        return is_user or is_contact or is_group
 
     def search_objects(
         self,
@@ -1246,6 +1266,8 @@ class LdapManager:
         for entry in entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
+            if not self._matches_search_mode(object_classes, search_mode):
+                continue
             name = self._display_name(entry, object_classes, dn)
             description = ""
             if "description" in entry:
@@ -1874,6 +1896,8 @@ class LdapManager:
         for entry in entries:
             dn = str(entry.entry_dn)
             object_classes = [str(x).lower() for x in entry.objectClass.values] if "objectClass" in entry else []
+            if not self._matches_search_mode(object_classes, search_mode):
+                continue
             name = self._display_name(entry, object_classes, dn)
 
             description = ""
