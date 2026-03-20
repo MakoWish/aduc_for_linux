@@ -5421,7 +5421,7 @@ class MainWindow(QMainWindow):
         action_menu = self.menuBar().addMenu("Action")
 
         self.find_action = QAction("Find...", self)
-        self.find_action.setShortcut("Ctrl+F")
+        self.find_action.setShortcuts(["Ctrl+F", "F3"])
         self.find_action.triggered.connect(self.find_in_current)
         action_menu.addAction(self.find_action)
 
