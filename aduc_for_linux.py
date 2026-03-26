@@ -76,6 +76,7 @@ CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "aduc-linux")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
 VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
 SPLASH_IMAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image.png")
+HELP_DOCS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "help.md")
 SPLASH_IMAGE_SIZE = 500
 SPLASH_FADE_DURATION_MS = 1400
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/MakoWish/aduc_for_linux/main/VERSION"
@@ -5468,6 +5469,15 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.advanced_features_action)
 
         help_menu = self.menuBar().addMenu("Help")
+        quick_help_action = QAction("Quick Help", self)
+        quick_help_action.triggered.connect(self.show_quick_help_dialog)
+        help_menu.addAction(quick_help_action)
+
+        full_help_action = QAction("Open Full Docs", self)
+        full_help_action.triggered.connect(self.show_full_help_dialog)
+        help_menu.addAction(full_help_action)
+        help_menu.addSeparator()
+
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
@@ -5589,6 +5599,57 @@ class MainWindow(QMainWindow):
             "ADUC for Linux\n\n"
             "A Linux-friendly Active Directory Users and Computers-style management console.",
         )
+
+    def _show_markdown_dialog(self, title: str, markdown_text: str) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(900, 650)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setMarkdown(markdown_text)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dlg.reject)
+        buttons.accepted.connect(dlg.accept)
+
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(text)
+        layout.addWidget(buttons)
+        dlg.exec()
+
+    def show_quick_help_dialog(self) -> None:
+        quick_help_md = (
+            "# Quick Help\n\n"
+            "## Connect\n"
+            "- Use **File > Connect** to connect to your domain controller.\n"
+            "- Choose **Credentials** or **Kerberos / SSO** depending on your environment.\n\n"
+            "## Find and Search\n"
+            "- Open search with **Ctrl+F** or **F3**.\n"
+            "- Use **Find objects of type** to limit search results by object type.\n"
+            "- If no matches are found, the app displays **No results found.**\n\n"
+            "## Common Actions\n"
+            "- Right-click objects for context actions (Properties, Rename, Delete, etc.).\n"
+            "- Use **Action** menu to create Users, Groups, Computers, and OUs.\n\n"
+            "## Need More Detail?\n"
+            "- Open **Help > Open Full Docs** for complete usage notes and troubleshooting."
+        )
+        self._show_markdown_dialog("Quick Help", quick_help_md)
+
+    def show_full_help_dialog(self) -> None:
+        if not os.path.exists(HELP_DOCS_FILE):
+            self.show_error(
+                "Help unavailable",
+                f"Could not find help docs at:\n{HELP_DOCS_FILE}",
+            )
+            return
+        try:
+            with open(HELP_DOCS_FILE, "r", encoding="utf-8") as handle:
+                docs_md = handle.read()
+        except OSError as e:
+            self.show_error("Help unavailable", str(e))
+            return
+        self._show_markdown_dialog("ADUC for Linux - Full Help", docs_md)
 
     def update_status_bar(self) -> None:
         selected_rows = len(self.table.selectionModel().selectedRows()) if self.table.selectionModel() else 0
@@ -6753,7 +6814,7 @@ class MainWindow(QMainWindow):
         elif chosen == properties_action:
             self.open_properties(obj)
         elif chosen == help_action:
-            QMessageBox.information(self, "Help", "Help topics are not implemented yet.")
+            self.show_quick_help_dialog()
 
     def on_table_context_menu(self, pos) -> None:
         item = self.table.itemAt(pos)
@@ -6918,7 +6979,7 @@ class MainWindow(QMainWindow):
         elif chosen == properties_action:
             self.open_properties(obj)
         elif chosen == help_action:
-            QMessageBox.information(self, "Help", "Help topics are not implemented yet.")
+            self.show_quick_help_dialog()
         elif open_action is not None and chosen == open_action:
             self.populate_main_pane(obj.dn)
             tree_item = self.find_tree_item_by_dn(obj.dn)
