@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -1450,7 +1451,7 @@ class LdapManager:
         if not ok:
             raise ValueError(str(self.conn.result))
 
-    def replace_object_attribute_values(self, dn: str, attr_name: str, values: list[str]) -> None:
+    def replace_object_attribute_values(self, dn: str, attr_name: str, values: list[Any]) -> None:
         if not self.conn:
             return
 
@@ -3659,13 +3660,15 @@ class UserPropertiesDialog(QDialog):
     }
 
     UAC_FLAGS: list[tuple[str, int]] = [
-        ("Account is disabled", 0x0002),
-        ("Account is locked out", 0x0010),
-        ("Password not required", 0x0020),
-        ("Password cannot change", 0x0040),
+        ("User must change password at next logon", 0),
+        ("User cannot change password", 0x0040),
         ("Password never expires", 0x10000),
-        ("Smart card required", 0x40000),
-        ("Trusted for delegation", 0x80000),
+        ("Store password using reversible encryption", 0x0080),
+        ("Account is disabled", 0x0002),
+        ("Smart card is required for interactive logon", 0x40000),
+        ("Account is sensitive and cannot be delegated", 0x100000),
+        ("User only Kerberos DES encryption types for this account", 0x200000),
+        ("Do not require Kerberos preauthentication", 0x400000),
     ]
 
     def __init__(
@@ -3688,7 +3691,18 @@ class UserPropertiesDialog(QDialog):
         self.primary_group_dn: Optional[str] = None
         self.current_uac_value = 0
         self.initially_locked = False
+        self.locked_out_checkbox: Optional[QCheckBox] = None
+        self.must_change_password_checkbox: Optional[QCheckBox] = None
         self.uac_checkboxes: list[tuple[QCheckBox, int]] = []
+        self.supports_aes128_checkbox: Optional[QCheckBox] = None
+        self.supports_aes256_checkbox: Optional[QCheckBox] = None
+        self.current_supported_encryption_types = 0
+        self.original_supported_encryption_types = 0
+        self.never_expires_radio: Optional[QRadioButton] = None
+        self.end_of_radio: Optional[QRadioButton] = None
+        self.account_expires_date: Optional[QDateTimeEdit] = None
+        self.original_account_expires_raw = ""
+        self.current_account_expires_raw = ""
         self.original_attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.selected_attribute: Optional[str] = None
@@ -3733,6 +3747,53 @@ class UserPropertiesDialog(QDialog):
         edit.setReadOnly(True)
         return edit
 
+    def _on_account_expires_mode_changed(self) -> None:
+        if self.account_expires_date and self.end_of_radio:
+            self.account_expires_date.setEnabled(self.end_of_radio.isChecked())
+        self.refresh_apply_button_state()
+
+    def _current_account_expires_raw(self) -> str:
+        if self.never_expires_radio and self.never_expires_radio.isChecked():
+            return "9223372036854775807"
+        if not self.account_expires_date:
+            return "9223372036854775807"
+        utc_dt = self.account_expires_date.dateTime().toUTC()
+        return str((utc_dt.toMSecsSinceEpoch() * 10000) + 116444736000000000)
+
+    def configure_logon_to(self) -> None:
+        current_value = self.attribute_values.get("userWorkstations", [""])[0] if self.attribute_values.get("userWorkstations") else ""
+        value, ok = QInputDialog.getText(
+            self,
+            "Logon To",
+            "Allowed workstations (comma-separated), leave empty for all:",
+            text=current_value,
+        )
+        if not ok:
+            return
+        new_value = value.strip()
+        self.attribute_values["userWorkstations"] = [new_value] if new_value else []
+        self.refresh_apply_button_state()
+
+    def configure_logon_hours(self) -> None:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Logon Hours")
+        msg.setText("Configure logon hours for this account.")
+        allow_all = msg.addButton("Allow all hours", QMessageBox.AcceptRole)
+        deny_all = msg.addButton("Deny all hours", QMessageBox.DestructiveRole)
+        clear_custom = msg.addButton("Clear (domain default)", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Cancel)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is allow_all:
+            self.attribute_values["logonHours"] = ["__B64__" + base64.b64encode(b"\xff" * 21).decode("ascii")]
+        elif clicked is deny_all:
+            self.attribute_values["logonHours"] = ["__B64__" + base64.b64encode(b"\x00" * 21).decode("ascii")]
+        elif clicked is clear_custom:
+            self.attribute_values["logonHours"] = []
+        else:
+            return
+        self.refresh_apply_button_state()
+
     def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
@@ -3765,17 +3826,19 @@ class UserPropertiesDialog(QDialog):
 
         form.addRow("User logon name:", self._readonly_line(self._single_attr(attrs, "userPrincipalName")))
         form.addRow("User logon name (pre-Windows 2000):", self._readonly_line(self._single_attr(attrs, "sAMAccountName")))
-        form.addRow("Logon script:", self._readonly_line(self._single_attr(attrs, "scriptPath")))
-        form.addRow("Home folder:", self._readonly_line(self._single_attr(attrs, "homeDirectory")))
-
-        uac_raw = self._single_attr(attrs, "userAccountControl")
-        self.uac_value_line = self._readonly_line(uac_raw)
-        form.addRow("userAccountControl:", self.uac_value_line)
         layout.addLayout(form)
 
-        flags_label = QLabel("Account options")
-        layout.addWidget(flags_label)
+        logon_buttons_row = QHBoxLayout()
+        logon_hours_btn = QPushButton("Logon Hours...")
+        logon_to_btn = QPushButton("Logon To...")
+        logon_hours_btn.clicked.connect(self.configure_logon_hours)
+        logon_to_btn.clicked.connect(self.configure_logon_to)
+        logon_buttons_row.addWidget(logon_hours_btn)
+        logon_buttons_row.addWidget(logon_to_btn)
+        logon_buttons_row.addStretch()
+        layout.addLayout(logon_buttons_row)
 
+        uac_raw = self._single_attr(attrs, "userAccountControl")
         flag_values = 0
         try:
             flag_values = int(uac_raw) if uac_raw else 0
@@ -3789,16 +3852,99 @@ class UserPropertiesDialog(QDialog):
         except ValueError:
             self.initially_locked = False
 
+        self.locked_out_checkbox = QCheckBox("Unlock account. This account is currently locked out on this Active Directory Domain Controller.")
+        self.locked_out_checkbox.setChecked(False)
+        self.locked_out_checkbox.setEnabled(self.initially_locked)
+        self.locked_out_checkbox.stateChanged.connect(self.refresh_apply_button_state)
+        layout.addWidget(self.locked_out_checkbox)
+
+        flags_label = QLabel("Account options:")
+        layout.addWidget(flags_label)
+
+        options_container = QWidget()
+        options_layout = QVBoxLayout(options_container)
+        options_layout.setContentsMargins(4, 4, 4, 4)
+
         for label, bitmask in self.UAC_FLAGS:
             box = QCheckBox(label)
-            if bitmask == 0x0010:
-                box.setChecked(self.initially_locked)
-                box.setToolTip("Active Directory controls lockout state via lockoutTime.")
+            if bitmask == 0:
+                pwd_last_set = self._single_attr(attrs, "pwdLastSet")
+                box.setChecked(pwd_last_set == "0")
+                self.must_change_password_checkbox = box
             else:
                 box.setChecked(bool(flag_values & bitmask))
             box.stateChanged.connect(self.refresh_apply_button_state)
             self.uac_checkboxes.append((box, bitmask))
-            layout.addWidget(box)
+            options_layout.addWidget(box)
+
+        supported_types_raw = self._single_attr(attrs, "msDS-SupportedEncryptionTypes")
+        try:
+            self.current_supported_encryption_types = int(supported_types_raw) if supported_types_raw else 0
+        except ValueError:
+            self.current_supported_encryption_types = 0
+        self.original_supported_encryption_types = self.current_supported_encryption_types
+
+        self.supports_aes128_checkbox = QCheckBox("This account supports Kerberos AES 128 bit encryption")
+        self.supports_aes128_checkbox.setChecked(bool(self.current_supported_encryption_types & 0x08))
+        self.supports_aes128_checkbox.stateChanged.connect(self.refresh_apply_button_state)
+        options_layout.addWidget(self.supports_aes128_checkbox)
+
+        self.supports_aes256_checkbox = QCheckBox("This account supports Kerberos AIE 256 bit encryption")
+        self.supports_aes256_checkbox.setChecked(bool(self.current_supported_encryption_types & 0x10))
+        self.supports_aes256_checkbox.stateChanged.connect(self.refresh_apply_button_state)
+        options_layout.addWidget(self.supports_aes256_checkbox)
+        options_layout.addStretch()
+
+        options_scroll = QScrollArea()
+        options_scroll.setWidgetResizable(True)
+        options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        options_scroll.setWidget(options_container)
+        options_scroll.setMinimumHeight(160)
+        layout.addWidget(options_scroll)
+
+        expires_label = QLabel("Account expires")
+        layout.addWidget(expires_label)
+
+        self.never_expires_radio = QRadioButton("Never")
+        self.end_of_radio = QRadioButton("End of:")
+        self.never_expires_radio.toggled.connect(self._on_account_expires_mode_changed)
+        self.end_of_radio.toggled.connect(self._on_account_expires_mode_changed)
+
+        expires_raw = self._single_attr(attrs, "accountExpires")
+        self.original_account_expires_raw = expires_raw
+        self.current_account_expires_raw = expires_raw
+
+        expires_row_1 = QHBoxLayout()
+        expires_row_1.addWidget(self.never_expires_radio)
+        expires_row_1.addStretch()
+        layout.addLayout(expires_row_1)
+
+        expires_row_2 = QHBoxLayout()
+        expires_row_2.addWidget(self.end_of_radio)
+        self.account_expires_date = QDateTimeEdit()
+        self.account_expires_date.setCalendarPopup(True)
+        self.account_expires_date.setDisplayFormat("yyyy-MM-dd")
+        self.account_expires_date.dateTimeChanged.connect(self.refresh_apply_button_state)
+        expires_row_2.addWidget(self.account_expires_date)
+        expires_row_2.addStretch()
+        layout.addLayout(expires_row_2)
+
+        expires_value_int = 0
+        try:
+            expires_value_int = int(expires_raw) if expires_raw else 0
+        except ValueError:
+            expires_value_int = 0
+        if expires_value_int in (0, 9223372036854775807):
+            self.never_expires_radio.setChecked(True)
+            self.account_expires_date.setDateTime(QDateTime.currentDateTime())
+        else:
+            dt = QDateTime.fromMSecsSinceEpoch((expires_value_int - 116444736000000000) // 10000, Qt.UTC).toLocalTime()
+            if dt.isValid():
+                self.account_expires_date.setDateTime(dt)
+            else:
+                self.account_expires_date.setDateTime(QDateTime.currentDateTime())
+            self.end_of_radio.setChecked(True)
+        self._on_account_expires_mode_changed()
 
         layout.addStretch()
         return tab
@@ -3928,20 +4074,44 @@ class UserPropertiesDialog(QDialog):
 
         for box, bitmask in self.uac_checkboxes:
             checked = box.isChecked()
-            if bitmask == 0x0010:
-                if (not checked) and self.initially_locked:
-                    should_unlock = True
+            if bitmask == 0:
                 continue
             if checked:
                 new_uac |= bitmask
             else:
                 new_uac &= ~bitmask
 
+        if self.locked_out_checkbox and self.initially_locked and self.locked_out_checkbox.isEnabled():
+            should_unlock = self.locked_out_checkbox.isChecked()
+
         return new_uac, should_unlock
 
     def has_pending_changes(self) -> bool:
         edited_uac, should_unlock = self._edited_uac_and_unlock()
         if edited_uac != self.current_uac_value or should_unlock:
+            return True
+
+        if self.must_change_password_checkbox:
+            must_change = self.must_change_password_checkbox.isChecked()
+            original_pwd_last_set = self._single_attr(self.original_attribute_values, "pwdLastSet")
+            if must_change != (original_pwd_last_set == "0"):
+                return True
+
+        encryption_types = self.current_supported_encryption_types
+        if self.supports_aes128_checkbox:
+            if self.supports_aes128_checkbox.isChecked():
+                encryption_types |= 0x08
+            else:
+                encryption_types &= ~0x08
+        if self.supports_aes256_checkbox:
+            if self.supports_aes256_checkbox.isChecked():
+                encryption_types |= 0x10
+            else:
+                encryption_types &= ~0x10
+        if encryption_types != self.current_supported_encryption_types:
+            return True
+
+        if self._current_account_expires_raw() != self.current_account_expires_raw:
             return True
 
         current_groups = sorted(self._current_member_of_dns(), key=str.lower)
@@ -3964,20 +4134,46 @@ class UserPropertiesDialog(QDialog):
             self.apply_button.setEnabled(self.has_pending_changes())
 
     def apply_account_changes(self) -> None:
-        for box, bitmask in self.uac_checkboxes:
-            if bitmask == 0x0010 and box.isChecked() and not self.initially_locked:
-                box.setChecked(False)
-
         new_uac, should_unlock = self._edited_uac_and_unlock()
 
         if new_uac != self.current_uac_value:
             self.ldap.set_user_account_control(self.user_obj.dn, new_uac)
             self.current_uac_value = new_uac
-            self.uac_value_line.setText(str(new_uac))
 
         if should_unlock:
             self.ldap.unlock_account(self.user_obj.dn)
             self.initially_locked = False
+            if self.locked_out_checkbox:
+                self.locked_out_checkbox.setChecked(False)
+                self.locked_out_checkbox.setEnabled(False)
+
+        if self.must_change_password_checkbox:
+            must_change = self.must_change_password_checkbox.isChecked()
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, "pwdLastSet", ["0"] if must_change else ["-1"])
+            self.attribute_values["pwdLastSet"] = ["0"] if must_change else ["-1"]
+            self.original_attribute_values["pwdLastSet"] = list(self.attribute_values["pwdLastSet"])
+
+        encryption_types = self.current_supported_encryption_types
+        if self.supports_aes128_checkbox:
+            if self.supports_aes128_checkbox.isChecked():
+                encryption_types |= 0x08
+            else:
+                encryption_types &= ~0x08
+        if self.supports_aes256_checkbox:
+            if self.supports_aes256_checkbox.isChecked():
+                encryption_types |= 0x10
+            else:
+                encryption_types &= ~0x10
+        if encryption_types != self.current_supported_encryption_types:
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, "msDS-SupportedEncryptionTypes", [str(encryption_types)])
+            self.current_supported_encryption_types = encryption_types
+            self.original_supported_encryption_types = encryption_types
+
+        account_expires_raw = self._current_account_expires_raw()
+        if account_expires_raw != self.current_account_expires_raw:
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, "accountExpires", [account_expires_raw])
+            self.current_account_expires_raw = account_expires_raw
+            self.original_account_expires_raw = account_expires_raw
 
     def apply_attribute_changes(self) -> None:
         for attr_name in sorted(self.attribute_values):
@@ -3987,7 +4183,16 @@ class UserPropertiesDialog(QDialog):
             original_values = self.original_attribute_values.get(attr_name, [])
             if current_values == original_values:
                 continue
-            self.ldap.replace_object_attribute_values(self.user_obj.dn, attr_name, current_values)
+            values_to_apply: list[Any] = current_values
+            if attr_name == "logonHours":
+                decoded_values: list[Any] = []
+                for val in current_values:
+                    if isinstance(val, str) and val.startswith("__B64__"):
+                        decoded_values.append(base64.b64decode(val[len("__B64__"):]))
+                    else:
+                        decoded_values.append(val)
+                values_to_apply = decoded_values
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, attr_name, values_to_apply)
             self.original_attribute_values[attr_name] = list(current_values)
 
     def apply_member_of_changes(self) -> None:
