@@ -3761,17 +3761,132 @@ class UserPropertiesDialog(QDialog):
         return str((utc_dt.toMSecsSinceEpoch() * 10000) + 116444736000000000)
 
     def configure_logon_to(self) -> None:
-        current_value = self.attribute_values.get("userWorkstations", [""])[0] if self.attribute_values.get("userWorkstations") else ""
-        value, ok = QInputDialog.getText(
-            self,
-            "Logon To",
-            "Allowed workstations (comma-separated), leave empty for all:",
-            text=current_value,
-        )
-        if not ok:
+        current_raw = self.attribute_values.get("userWorkstations", [""])[0] if self.attribute_values.get("userWorkstations") else ""
+        original_computers = [item.strip() for item in current_raw.split(",") if item.strip()]
+        original_all_computers = len(original_computers) == 0
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Logon Workstations")
+        dlg.resize(520, 420)
+        layout = QVBoxLayout(dlg)
+
+        intro = QLabel("In Computer name, type the computer's NetBIOS or Domain Name System (DNS) name:")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        layout.addWidget(QLabel("This user can log on to:"))
+        all_computers_radio = QRadioButton("All computers")
+        following_computers_radio = QRadioButton("The following computers")
+        if original_all_computers:
+            all_computers_radio.setChecked(True)
+        else:
+            following_computers_radio.setChecked(True)
+        layout.addWidget(all_computers_radio)
+        layout.addWidget(following_computers_radio)
+
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel("Computer name:"))
+        computer_name_edit = QLineEdit()
+        input_row.addWidget(computer_name_edit)
+        layout.addLayout(input_row)
+
+        list_row = QHBoxLayout()
+        workstation_list = QListWidget()
+        for name in original_computers:
+            workstation_list.addItem(name)
+        list_row.addWidget(workstation_list, 1)
+
+        button_col = QVBoxLayout()
+        add_btn = QPushButton("Add")
+        edit_btn = QPushButton("Edit")
+        remove_btn = QPushButton("Remove")
+        button_col.addWidget(add_btn)
+        button_col.addWidget(edit_btn)
+        button_col.addWidget(remove_btn)
+        button_col.addStretch()
+        list_row.addLayout(button_col)
+        layout.addLayout(list_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        layout.addWidget(buttons)
+
+        def _current_computers() -> list[str]:
+            return [workstation_list.item(i).text().strip() for i in range(workstation_list.count()) if workstation_list.item(i).text().strip()]
+
+        def _has_changes() -> bool:
+            now_all = all_computers_radio.isChecked()
+            now_computers = _current_computers()
+            return now_all != original_all_computers or now_computers != original_computers
+
+        def _refresh_buttons() -> None:
+            restricted = following_computers_radio.isChecked()
+            computer_name_edit.setEnabled(restricted)
+            add_btn.setEnabled(restricted and bool(computer_name_edit.text().strip()))
+            has_selection = workstation_list.currentItem() is not None
+            edit_btn.setEnabled(restricted and has_selection)
+            remove_btn.setEnabled(restricted and has_selection)
+            workstation_list.setEnabled(restricted)
+            ok_btn.setEnabled(_has_changes())
+
+        def _add_computer() -> None:
+            name = computer_name_edit.text().strip()
+            if not name:
+                return
+            existing = {item.text().strip().lower() for item in [workstation_list.item(i) for i in range(workstation_list.count())]}
+            if name.lower() in existing:
+                QMessageBox.information(dlg, "Duplicate computer", "That computer is already listed.")
+                return
+            workstation_list.addItem(name)
+            computer_name_edit.clear()
+            _refresh_buttons()
+
+        def _edit_computer() -> None:
+            item = workstation_list.currentItem()
+            if not item:
+                return
+            existing = {workstation_list.item(i).text().strip().lower() for i in range(workstation_list.count()) if workstation_list.item(i) is not item}
+            new_name = computer_name_edit.text().strip() or item.text().strip()
+            if not new_name:
+                return
+            if new_name.lower() in existing:
+                QMessageBox.information(dlg, "Duplicate computer", "That computer is already listed.")
+                return
+            item.setText(new_name)
+            computer_name_edit.clear()
+            _refresh_buttons()
+
+        def _remove_computer() -> None:
+            row = workstation_list.currentRow()
+            if row < 0:
+                return
+            workstation_list.takeItem(row)
+            computer_name_edit.clear()
+            _refresh_buttons()
+
+        def _sync_from_selection() -> None:
+            item = workstation_list.currentItem()
+            computer_name_edit.setText(item.text() if item else "")
+            _refresh_buttons()
+
+        all_computers_radio.toggled.connect(_refresh_buttons)
+        following_computers_radio.toggled.connect(_refresh_buttons)
+        computer_name_edit.textChanged.connect(_refresh_buttons)
+        workstation_list.itemSelectionChanged.connect(_sync_from_selection)
+        add_btn.clicked.connect(_add_computer)
+        edit_btn.clicked.connect(_edit_computer)
+        remove_btn.clicked.connect(_remove_computer)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        _refresh_buttons()
+
+        if dlg.exec() != QDialog.Accepted:
             return
-        new_value = value.strip()
-        self.attribute_values["userWorkstations"] = [new_value] if new_value else []
+
+        if all_computers_radio.isChecked():
+            self.attribute_values["userWorkstations"] = []
+        else:
+            self.attribute_values["userWorkstations"] = [",".join(_current_computers())]
         self.refresh_apply_button_state()
 
     def configure_logon_hours(self) -> None:
