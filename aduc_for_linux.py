@@ -3939,6 +3939,7 @@ class UserPropertiesDialog(QDialog):
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         table.setSelectionBehavior(QAbstractItemView.SelectItems)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        table.horizontalHeader().setStretchLastSection(False)
         table.horizontalHeader().setDefaultSectionSize(14)
         table.verticalHeader().setDefaultSectionSize(28)
         table.horizontalHeader().setMinimumSectionSize(12)
@@ -3948,6 +3949,8 @@ class UserPropertiesDialog(QDialog):
                 item = QTableWidgetItem("")
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 table.setItem(day, hour, item)
+        for hour in range(24):
+            table.setColumnWidth(hour, 14)
         body.addWidget(table, 1)
 
         right_controls = QVBoxLayout()
