@@ -3938,6 +3938,7 @@ class UserPropertiesDialog(QDialog):
         table.setVerticalHeaderLabels(day_labels)
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
         table.horizontalHeader().setDefaultSectionSize(14)
         table.verticalHeader().setDefaultSectionSize(28)
         table.horizontalHeader().setMinimumSectionSize(12)
