@@ -3976,6 +3976,9 @@ class UserPropertiesDialog(QDialog):
         body.addLayout(right_controls)
         layout.addLayout(body)
 
+        selection_summary_label = QLabel("")
+        layout.addWidget(selection_summary_label)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_btn = buttons.button(QDialogButtonBox.Ok)
         layout.addWidget(buttons)
@@ -4003,6 +4006,18 @@ class UserPropertiesDialog(QDialog):
 
         def _sync_radio_from_selection() -> None:
             selected = table.selectedIndexes()
+            if not selected:
+                selection_summary_label.setText("")
+            else:
+                rows = [idx.row() for idx in selected]
+                cols = [idx.column() for idx in selected]
+                start_day = day_labels[min(rows)]
+                end_day = day_labels[max(rows)]
+                start_hour = min(cols)
+                end_hour = max(cols)
+                selection_summary_label.setText(
+                    f"{start_day} through {end_day} from {start_hour:02d}:00 to  {end_hour:02d}:00"
+                )
             permitted_radio.blockSignals(True)
             denied_radio.blockSignals(True)
             if not selected:
