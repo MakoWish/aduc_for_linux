@@ -3890,23 +3890,139 @@ class UserPropertiesDialog(QDialog):
         self.refresh_apply_button_state()
 
     def configure_logon_hours(self) -> None:
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Logon Hours")
-        msg.setText("Configure logon hours for this account.")
-        allow_all = msg.addButton("Allow all hours", QMessageBox.AcceptRole)
-        deny_all = msg.addButton("Deny all hours", QMessageBox.DestructiveRole)
-        clear_custom = msg.addButton("Clear (domain default)", QMessageBox.ActionRole)
-        msg.addButton(QMessageBox.Cancel)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked is allow_all:
-            self.attribute_values["logonHours"] = ["__B64__" + base64.b64encode(b"\xff" * 21).decode("ascii")]
-        elif clicked is deny_all:
-            self.attribute_values["logonHours"] = ["__B64__" + base64.b64encode(b"\x00" * 21).decode("ascii")]
-        elif clicked is clear_custom:
-            self.attribute_values["logonHours"] = []
-        else:
+        day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+        def _decode_logon_hours(values: list[str]) -> bytes:
+            if not values:
+                return b"\xff" * 21
+            raw = values[0].strip()
+            if not raw:
+                return b"\xff" * 21
+            if raw.startswith("__B64__"):
+                try:
+                    decoded = base64.b64decode(raw[len("__B64__"):], validate=True)
+                    return decoded[:21].ljust(21, b"\xff")
+                except Exception:
+                    return b"\xff" * 21
+            return b"\xff" * 21
+
+        def _is_allowed(mask: bytes, ui_day: int, hour: int) -> bool:
+            ad_day = (ui_day + 1) % 7  # AD uses Sunday-first; UI is Monday-first.
+            bit_index = (ad_day * 24) + hour
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            return bool(mask[byte_index] & (1 << bit_offset))
+
+        def _set_allowed(mask: bytearray, ui_day: int, hour: int, allowed: bool) -> None:
+            ad_day = (ui_day + 1) % 7
+            bit_index = (ad_day * 24) + hour
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            if allowed:
+                mask[byte_index] |= (1 << bit_offset)
+            else:
+                mask[byte_index] &= ~(1 << bit_offset)
+
+        current_values = self.attribute_values.get("logonHours", [])
+        original_mask = _decode_logon_hours(current_values)
+        working_mask = bytearray(original_mask)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Logon Hours")
+        dlg.resize(920, 360)
+        layout = QVBoxLayout(dlg)
+
+        body = QHBoxLayout()
+        table = QTableWidget(7, 24)
+        table.setHorizontalHeaderLabels([str(i) for i in range(24)])
+        table.setVerticalHeaderLabels(day_labels)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        table.horizontalHeader().setDefaultSectionSize(28)
+        table.verticalHeader().setDefaultSectionSize(28)
+        table.horizontalHeader().setMinimumSectionSize(24)
+        table.verticalHeader().setMinimumSectionSize(24)
+        for day in range(7):
+            for hour in range(24):
+                item = QTableWidgetItem("")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(day, hour, item)
+        body.addWidget(table, 1)
+
+        right_controls = QVBoxLayout()
+        right_controls.addWidget(QLabel("Selected hours are:"))
+        permitted_radio = QRadioButton("Logon Permitted")
+        denied_radio = QRadioButton("Logon Denied")
+        right_controls.addWidget(permitted_radio)
+        right_controls.addWidget(denied_radio)
+        right_controls.addStretch()
+        body.addLayout(right_controls)
+        layout.addLayout(body)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        layout.addWidget(buttons)
+
+        def _paint_cell(day: int, hour: int) -> None:
+            item = table.item(day, hour)
+            if not item:
+                return
+            allowed = _is_allowed(bytes(working_mask), day, hour)
+            item.setBackground(QColor(198, 239, 206) if allowed else QColor(255, 199, 206))
+
+        def _refresh_table() -> None:
+            for day in range(7):
+                for hour in range(24):
+                    _paint_cell(day, hour)
+            ok_btn.setEnabled(bytes(working_mask) != original_mask)
+
+        def _apply_to_selection(allow: bool) -> None:
+            selected = table.selectedIndexes()
+            if not selected:
+                return
+            for idx in selected:
+                _set_allowed(working_mask, idx.row(), idx.column(), allow)
+            _refresh_table()
+
+        def _sync_radio_from_selection() -> None:
+            selected = table.selectedIndexes()
+            permitted_radio.blockSignals(True)
+            denied_radio.blockSignals(True)
+            if not selected:
+                permitted_radio.setChecked(False)
+                denied_radio.setChecked(False)
+                permitted_radio.blockSignals(False)
+                denied_radio.blockSignals(False)
+                return
+            first = selected[0]
+            all_allowed = all(_is_allowed(bytes(working_mask), idx.row(), idx.column()) for idx in selected)
+            all_denied = all(not _is_allowed(bytes(working_mask), idx.row(), idx.column()) for idx in selected)
+            if all_allowed:
+                permitted_radio.setChecked(True)
+                denied_radio.setChecked(False)
+            elif all_denied:
+                denied_radio.setChecked(True)
+                permitted_radio.setChecked(False)
+            else:
+                permitted_radio.setChecked(_is_allowed(bytes(working_mask), first.row(), first.column()))
+                denied_radio.setChecked(not permitted_radio.isChecked())
+            permitted_radio.blockSignals(False)
+            denied_radio.blockSignals(False)
+
+        table.itemSelectionChanged.connect(_sync_radio_from_selection)
+        permitted_radio.toggled.connect(lambda checked: _apply_to_selection(True) if checked else None)
+        denied_radio.toggled.connect(lambda checked: _apply_to_selection(False) if checked else None)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        _refresh_table()
+        _sync_radio_from_selection()
+
+        if dlg.exec() != QDialog.Accepted:
             return
+
+        encoded = "__B64__" + base64.b64encode(bytes(working_mask)).decode("ascii")
+        self.attribute_values["logonHours"] = [encoded]
         self.refresh_apply_button_state()
 
     def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
@@ -3967,7 +4083,12 @@ class UserPropertiesDialog(QDialog):
         except ValueError:
             self.initially_locked = False
 
-        self.locked_out_checkbox = QCheckBox("Unlock account. This account is currently locked out on this Active Directory Domain Controller.")
+        unlock_text = (
+            "Unlock account. This account is currently locked out on this Active Directory Domain Controller."
+            if self.initially_locked
+            else "Unlock account"
+        )
+        self.locked_out_checkbox = QCheckBox(unlock_text)
         self.locked_out_checkbox.setChecked(False)
         self.locked_out_checkbox.setEnabled(self.initially_locked)
         self.locked_out_checkbox.stateChanged.connect(self.refresh_apply_button_state)
