@@ -7850,21 +7850,8 @@ class StartupSplash(QSplashScreen):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self.center_on_current_screen()
-        QTimer.singleShot(0, self.center_on_current_screen)
         if self._start_time == 0.0:
             self._start_time = time.monotonic()
-
-    def center_on_current_screen(self) -> None:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            screen = self.screen()
-        if screen is None:
-            return
-        geometry = screen.geometry()
-        x = geometry.x() + (geometry.width() - self.width()) // 2
-        y = geometry.y() + (geometry.height() - self.height()) // 2
-        self.move(x, y)
 
     def _start_fade(self) -> None:
         if self._fade_started:
