@@ -5828,6 +5828,7 @@ class MainWindow(QMainWindow):
         self.main_table_column_widths: list[int] = []
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
+        self.dialog_sizes: dict[str, tuple[int, int]] = {}
         self.show_advanced_features = True
         self.show_empty_attributes = False
         self.current_dn: Optional[str] = None
@@ -5836,6 +5837,7 @@ class MainWindow(QMainWindow):
         self._move_worker: Optional[MoveOperationWorker] = None
         self._move_progress_dialog: Optional[QProgressDialog] = None
         self.load_settings()
+        QApplication.instance().installEventFilter(self)
 
         if self.window_size:
             self.resize(*self.window_size)
@@ -6153,6 +6155,29 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    @staticmethod
+    def _dialog_size_key(dialog: QDialog) -> str:
+        class_name = dialog.metaObject().className()
+        if class_name == "QDialog":
+            title = dialog.windowTitle().strip()
+            return f"QDialog::{title}" if title else "QDialog"
+        return class_name
+
+    def eventFilter(self, watched: QObject, event) -> bool:
+        if isinstance(watched, QDialog) and watched.parent() is not None:
+            if isinstance(watched, (QMessageBox, QInputDialog)):
+                return super().eventFilter(watched, event)
+            key = self._dialog_size_key(watched)
+            if event.type() == QEvent.Show:
+                saved_size = self.dialog_sizes.get(key)
+                if saved_size and saved_size[0] > 0 and saved_size[1] > 0:
+                    watched.resize(saved_size[0], saved_size[1])
+            elif event.type() == QEvent.Close:
+                self.dialog_sizes[key] = (watched.width(), watched.height())
+                if hasattr(self, "table") and hasattr(self, "splitter"):
+                    self.save_settings()
+        return super().eventFilter(watched, event)
+
     def load_settings(self) -> None:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -6232,6 +6257,21 @@ class MainWindow(QMainWindow):
                     continue
             self.main_splitter_sizes = parsed_splitter_sizes
 
+        dialog_sizes_raw = data.get("dialog_sizes", {})
+        if isinstance(dialog_sizes_raw, dict):
+            parsed_dialog_sizes: dict[str, tuple[int, int]] = {}
+            for key, value in dialog_sizes_raw.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
+                    continue
+                try:
+                    width = int(value.get("width", 0))
+                    height = int(value.get("height", 0))
+                except (TypeError, ValueError):
+                    continue
+                if width > 0 and height > 0:
+                    parsed_dialog_sizes[key] = (width, height)
+            self.dialog_sizes = parsed_dialog_sizes
+
     def save_settings(self) -> None:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         data = {
@@ -6257,6 +6297,10 @@ class MainWindow(QMainWindow):
             "window_width": self.width(),
             "window_height": self.height(),
             "main_splitter_sizes": self.splitter.sizes(),
+            "dialog_sizes": {
+                key: {"width": size[0], "height": size[1]}
+                for key, size in self.dialog_sizes.items()
+            },
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
