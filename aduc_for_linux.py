@@ -7871,10 +7871,14 @@ class StartupSplash(QSplashScreen):
 
 def launch_main_window(app: QApplication, splash: StartupSplash) -> None:
     main_window = MainWindow()
-    main_window.show()
-    splash.fade_animation.finished.connect(prompt_for_update_if_available)
+
+    def _finish_startup() -> None:
+        main_window.show()
+        app.main_window = main_window
+        prompt_for_update_if_available()
+
+    splash.fade_animation.finished.connect(_finish_startup)
     splash.finish_with_fade()
-    app.main_window = main_window
 
 
 def main() -> int:
