@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSplitter,
     QStyle,
     QTabWidget,
@@ -1450,7 +1451,7 @@ class LdapManager:
         if not ok:
             raise ValueError(str(self.conn.result))
 
-    def replace_object_attribute_values(self, dn: str, attr_name: str, values: list[str]) -> None:
+    def replace_object_attribute_values(self, dn: str, attr_name: str, values: list[Any]) -> None:
         if not self.conn:
             return
 
@@ -3659,13 +3660,15 @@ class UserPropertiesDialog(QDialog):
     }
 
     UAC_FLAGS: list[tuple[str, int]] = [
-        ("Account is disabled", 0x0002),
-        ("Account is locked out", 0x0010),
-        ("Password not required", 0x0020),
-        ("Password cannot change", 0x0040),
+        ("User must change password at next logon", 0),
+        ("User cannot change password", 0x0040),
         ("Password never expires", 0x10000),
-        ("Smart card required", 0x40000),
-        ("Trusted for delegation", 0x80000),
+        ("Store password using reversible encryption", 0x0080),
+        ("Account is disabled", 0x0002),
+        ("Smart card is required for interactive logon", 0x40000),
+        ("Account is sensitive and cannot be delegated", 0x100000),
+        ("User only Kerberos DES encryption types for this account", 0x200000),
+        ("Do not require Kerberos preauthentication", 0x400000),
     ]
 
     def __init__(
@@ -3688,7 +3691,18 @@ class UserPropertiesDialog(QDialog):
         self.primary_group_dn: Optional[str] = None
         self.current_uac_value = 0
         self.initially_locked = False
+        self.locked_out_checkbox: Optional[QCheckBox] = None
+        self.must_change_password_checkbox: Optional[QCheckBox] = None
         self.uac_checkboxes: list[tuple[QCheckBox, int]] = []
+        self.supports_aes128_checkbox: Optional[QCheckBox] = None
+        self.supports_aes256_checkbox: Optional[QCheckBox] = None
+        self.current_supported_encryption_types = 0
+        self.original_supported_encryption_types = 0
+        self.never_expires_radio: Optional[QRadioButton] = None
+        self.end_of_radio: Optional[QRadioButton] = None
+        self.account_expires_date: Optional[QDateTimeEdit] = None
+        self.original_account_expires_raw = ""
+        self.current_account_expires_raw = ""
         self.original_attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.selected_attribute: Optional[str] = None
@@ -3733,6 +3747,320 @@ class UserPropertiesDialog(QDialog):
         edit.setReadOnly(True)
         return edit
 
+    def _on_account_expires_mode_changed(self) -> None:
+        if self.account_expires_date and self.end_of_radio:
+            self.account_expires_date.setEnabled(self.end_of_radio.isChecked())
+        self.refresh_apply_button_state()
+
+    def _current_account_expires_raw(self) -> str:
+        if self.never_expires_radio and self.never_expires_radio.isChecked():
+            return "9223372036854775807"
+        if not self.account_expires_date:
+            return "9223372036854775807"
+        utc_dt = self.account_expires_date.dateTime().toUTC()
+        return str((utc_dt.toMSecsSinceEpoch() * 10000) + 116444736000000000)
+
+    def configure_logon_to(self) -> None:
+        current_raw = self.attribute_values.get("userWorkstations", [""])[0] if self.attribute_values.get("userWorkstations") else ""
+        original_computers = [item.strip() for item in current_raw.split(",") if item.strip()]
+        original_all_computers = len(original_computers) == 0
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Logon Workstations")
+        dlg.resize(520, 420)
+        layout = QVBoxLayout(dlg)
+
+        intro = QLabel("In Computer name, type the computer's NetBIOS or Domain Name System (DNS) name:")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        layout.addWidget(QLabel("This user can log on to:"))
+        all_computers_radio = QRadioButton("All computers")
+        following_computers_radio = QRadioButton("The following computers")
+        if original_all_computers:
+            all_computers_radio.setChecked(True)
+        else:
+            following_computers_radio.setChecked(True)
+        layout.addWidget(all_computers_radio)
+        layout.addWidget(following_computers_radio)
+
+        input_row = QHBoxLayout()
+        input_row.addWidget(QLabel("Computer name:"))
+        computer_name_edit = QLineEdit()
+        input_row.addWidget(computer_name_edit)
+        layout.addLayout(input_row)
+
+        list_row = QHBoxLayout()
+        workstation_list = QListWidget()
+        for name in original_computers:
+            workstation_list.addItem(name)
+        list_row.addWidget(workstation_list, 1)
+
+        button_col = QVBoxLayout()
+        add_btn = QPushButton("Add")
+        edit_btn = QPushButton("Edit")
+        remove_btn = QPushButton("Remove")
+        button_col.addWidget(add_btn)
+        button_col.addWidget(edit_btn)
+        button_col.addWidget(remove_btn)
+        button_col.addStretch()
+        list_row.addLayout(button_col)
+        layout.addLayout(list_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        layout.addWidget(buttons)
+
+        def _current_computers() -> list[str]:
+            return [workstation_list.item(i).text().strip() for i in range(workstation_list.count()) if workstation_list.item(i).text().strip()]
+
+        def _has_changes() -> bool:
+            now_all = all_computers_radio.isChecked()
+            now_computers = _current_computers()
+            return now_all != original_all_computers or now_computers != original_computers
+
+        def _refresh_buttons() -> None:
+            restricted = following_computers_radio.isChecked()
+            computer_name_edit.setEnabled(restricted)
+            add_btn.setEnabled(restricted and bool(computer_name_edit.text().strip()))
+            has_selection = workstation_list.currentItem() is not None
+            edit_btn.setEnabled(restricted and has_selection)
+            remove_btn.setEnabled(restricted and has_selection)
+            workstation_list.setEnabled(restricted)
+            ok_btn.setEnabled(_has_changes())
+
+        def _add_computer() -> None:
+            name = computer_name_edit.text().strip()
+            if not name:
+                return
+            existing = {item.text().strip().lower() for item in [workstation_list.item(i) for i in range(workstation_list.count())]}
+            if name.lower() in existing:
+                QMessageBox.information(dlg, "Duplicate computer", "That computer is already listed.")
+                return
+            workstation_list.addItem(name)
+            computer_name_edit.clear()
+            _refresh_buttons()
+
+        def _edit_computer() -> None:
+            item = workstation_list.currentItem()
+            if not item:
+                return
+            existing = {workstation_list.item(i).text().strip().lower() for i in range(workstation_list.count()) if workstation_list.item(i) is not item}
+            new_name = computer_name_edit.text().strip() or item.text().strip()
+            if not new_name:
+                return
+            if new_name.lower() in existing:
+                QMessageBox.information(dlg, "Duplicate computer", "That computer is already listed.")
+                return
+            item.setText(new_name)
+            computer_name_edit.clear()
+            _refresh_buttons()
+
+        def _remove_computer() -> None:
+            row = workstation_list.currentRow()
+            if row < 0:
+                return
+            workstation_list.takeItem(row)
+            computer_name_edit.clear()
+            _refresh_buttons()
+
+        def _sync_from_selection() -> None:
+            item = workstation_list.currentItem()
+            computer_name_edit.setText(item.text() if item else "")
+            _refresh_buttons()
+
+        all_computers_radio.toggled.connect(_refresh_buttons)
+        following_computers_radio.toggled.connect(_refresh_buttons)
+        computer_name_edit.textChanged.connect(_refresh_buttons)
+        workstation_list.itemSelectionChanged.connect(_sync_from_selection)
+        add_btn.clicked.connect(_add_computer)
+        edit_btn.clicked.connect(_edit_computer)
+        remove_btn.clicked.connect(_remove_computer)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        _refresh_buttons()
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        if all_computers_radio.isChecked():
+            self.attribute_values["userWorkstations"] = []
+        else:
+            self.attribute_values["userWorkstations"] = [",".join(_current_computers())]
+        self.refresh_apply_button_state()
+
+    def configure_logon_hours(self) -> None:
+        day_labels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+
+        def _decode_logon_hours(values: list[str]) -> bytes:
+            if not values:
+                return b"\xff" * 21
+            raw = values[0].strip()
+            if not raw:
+                return b"\xff" * 21
+            if raw.startswith("__B64__"):
+                try:
+                    decoded = base64.b64decode(raw[len("__B64__"):], validate=True)
+                    return decoded[:21].ljust(21, b"\xff")
+                except Exception:
+                    return b"\xff" * 21
+            return b"\xff" * 21
+
+        def _is_allowed(mask: bytes, ui_day: int, hour: int) -> bool:
+            ad_day = ui_day
+            bit_index = (ad_day * 24) + hour
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            return bool(mask[byte_index] & (1 << bit_offset))
+
+        def _set_allowed(mask: bytearray, ui_day: int, hour: int, allowed: bool) -> None:
+            ad_day = ui_day
+            bit_index = (ad_day * 24) + hour
+            byte_index = bit_index // 8
+            bit_offset = bit_index % 8
+            if allowed:
+                mask[byte_index] |= (1 << bit_offset)
+            else:
+                mask[byte_index] &= ~(1 << bit_offset)
+
+        current_values = self.attribute_values.get("logonHours", [])
+        original_mask = _decode_logon_hours(current_values)
+        working_mask = bytearray(original_mask)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Logon Hours")
+        dlg.resize(600, 380)
+        layout = QVBoxLayout(dlg)
+
+        body = QHBoxLayout()
+        table = QTableWidget(7, 24)
+        table.setHorizontalHeaderLabels([str(i) for i in range(24)])
+        table.setVerticalHeaderLabels(day_labels)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setDefaultSectionSize(14)
+        table.verticalHeader().setDefaultSectionSize(28)
+        table.horizontalHeader().setMinimumSectionSize(12)
+        table.verticalHeader().setMinimumSectionSize(24)
+        for day in range(7):
+            for hour in range(24):
+                item = QTableWidgetItem("")
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                table.setItem(day, hour, item)
+        for hour in range(24):
+            table.setColumnWidth(hour, 14)
+        body.addWidget(table, 1)
+
+        right_controls = QVBoxLayout()
+        right_controls.addWidget(QLabel("Selected hours are:"))
+        permitted_radio = QRadioButton("Logon Permitted")
+        denied_radio = QRadioButton("Logon Denied")
+
+        permitted_row = QHBoxLayout()
+        permitted_color = QLabel()
+        permitted_color.setFixedSize(14, 14)
+        permitted_color.setStyleSheet("background-color: rgb(198, 239, 206); border: 1px solid #888;")
+        permitted_row.addWidget(permitted_color)
+        permitted_row.addWidget(permitted_radio)
+        permitted_row.addStretch()
+
+        denied_row = QHBoxLayout()
+        denied_color = QLabel()
+        denied_color.setFixedSize(14, 14)
+        denied_color.setStyleSheet("background-color: rgb(255, 199, 206); border: 1px solid #888;")
+        denied_row.addWidget(denied_color)
+        denied_row.addWidget(denied_radio)
+        denied_row.addStretch()
+
+        right_controls.addLayout(permitted_row)
+        right_controls.addLayout(denied_row)
+        right_controls.addStretch()
+        body.addLayout(right_controls)
+        layout.addLayout(body)
+
+        selection_summary_label = QLabel("")
+        layout.addWidget(selection_summary_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_btn = buttons.button(QDialogButtonBox.Ok)
+        layout.addWidget(buttons)
+
+        def _paint_cell(day: int, hour: int) -> None:
+            item = table.item(day, hour)
+            if not item:
+                return
+            allowed = _is_allowed(bytes(working_mask), day, hour)
+            item.setBackground(QColor(198, 239, 206) if allowed else QColor(255, 199, 206))
+
+        def _refresh_table() -> None:
+            for day in range(7):
+                for hour in range(24):
+                    _paint_cell(day, hour)
+            ok_btn.setEnabled(bytes(working_mask) != original_mask)
+
+        def _apply_to_selection(allow: bool) -> None:
+            selected = table.selectedIndexes()
+            if not selected:
+                return
+            for idx in selected:
+                _set_allowed(working_mask, idx.row(), idx.column(), allow)
+            _refresh_table()
+
+        def _sync_radio_from_selection() -> None:
+            selected = table.selectedIndexes()
+            if not selected:
+                selection_summary_label.setText("")
+            else:
+                rows = [idx.row() for idx in selected]
+                cols = [idx.column() for idx in selected]
+                start_day = day_labels[min(rows)]
+                end_day = day_labels[max(rows)]
+                start_hour = min(cols)
+                end_hour = max(cols)
+                selection_summary_label.setText(
+                    f"{start_day} through {end_day} from {start_hour:02d}:00 to  {end_hour:02d}:00"
+                )
+            permitted_radio.blockSignals(True)
+            denied_radio.blockSignals(True)
+            if not selected:
+                permitted_radio.setChecked(False)
+                denied_radio.setChecked(False)
+                permitted_radio.blockSignals(False)
+                denied_radio.blockSignals(False)
+                return
+            first = selected[0]
+            all_allowed = all(_is_allowed(bytes(working_mask), idx.row(), idx.column()) for idx in selected)
+            all_denied = all(not _is_allowed(bytes(working_mask), idx.row(), idx.column()) for idx in selected)
+            if all_allowed:
+                permitted_radio.setChecked(True)
+                denied_radio.setChecked(False)
+            elif all_denied:
+                denied_radio.setChecked(True)
+                permitted_radio.setChecked(False)
+            else:
+                permitted_radio.setChecked(_is_allowed(bytes(working_mask), first.row(), first.column()))
+                denied_radio.setChecked(not permitted_radio.isChecked())
+            permitted_radio.blockSignals(False)
+            denied_radio.blockSignals(False)
+
+        table.itemSelectionChanged.connect(_sync_radio_from_selection)
+        permitted_radio.toggled.connect(lambda checked: _apply_to_selection(True) if checked else None)
+        denied_radio.toggled.connect(lambda checked: _apply_to_selection(False) if checked else None)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+
+        _refresh_table()
+        _sync_radio_from_selection()
+
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        encoded = "__B64__" + base64.b64encode(bytes(working_mask)).decode("ascii")
+        self.attribute_values["logonHours"] = [encoded]
+        self.refresh_apply_button_state()
+
     def build_general_tab(self, obj: LdapObject, attrs: dict[str, list[str]]) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
@@ -3765,17 +4093,19 @@ class UserPropertiesDialog(QDialog):
 
         form.addRow("User logon name:", self._readonly_line(self._single_attr(attrs, "userPrincipalName")))
         form.addRow("User logon name (pre-Windows 2000):", self._readonly_line(self._single_attr(attrs, "sAMAccountName")))
-        form.addRow("Logon script:", self._readonly_line(self._single_attr(attrs, "scriptPath")))
-        form.addRow("Home folder:", self._readonly_line(self._single_attr(attrs, "homeDirectory")))
-
-        uac_raw = self._single_attr(attrs, "userAccountControl")
-        self.uac_value_line = self._readonly_line(uac_raw)
-        form.addRow("userAccountControl:", self.uac_value_line)
         layout.addLayout(form)
 
-        flags_label = QLabel("Account options")
-        layout.addWidget(flags_label)
+        logon_buttons_row = QHBoxLayout()
+        logon_hours_btn = QPushButton("Logon Hours...")
+        logon_to_btn = QPushButton("Logon To...")
+        logon_hours_btn.clicked.connect(self.configure_logon_hours)
+        logon_to_btn.clicked.connect(self.configure_logon_to)
+        logon_buttons_row.addWidget(logon_hours_btn)
+        logon_buttons_row.addWidget(logon_to_btn)
+        logon_buttons_row.addStretch()
+        layout.addLayout(logon_buttons_row)
 
+        uac_raw = self._single_attr(attrs, "userAccountControl")
         flag_values = 0
         try:
             flag_values = int(uac_raw) if uac_raw else 0
@@ -3789,16 +4119,104 @@ class UserPropertiesDialog(QDialog):
         except ValueError:
             self.initially_locked = False
 
+        unlock_text = (
+            "Unlock account. This account is currently locked out on this Active Directory Domain Controller."
+            if self.initially_locked
+            else "Unlock account"
+        )
+        self.locked_out_checkbox = QCheckBox(unlock_text)
+        self.locked_out_checkbox.setChecked(False)
+        self.locked_out_checkbox.setEnabled(self.initially_locked)
+        self.locked_out_checkbox.stateChanged.connect(self.refresh_apply_button_state)
+        layout.addWidget(self.locked_out_checkbox)
+
+        flags_label = QLabel("Account options:")
+        layout.addWidget(flags_label)
+
+        options_container = QWidget()
+        options_layout = QVBoxLayout(options_container)
+        options_layout.setContentsMargins(4, 4, 4, 4)
+
         for label, bitmask in self.UAC_FLAGS:
             box = QCheckBox(label)
-            if bitmask == 0x0010:
-                box.setChecked(self.initially_locked)
-                box.setToolTip("Active Directory controls lockout state via lockoutTime.")
+            if bitmask == 0:
+                pwd_last_set = self._single_attr(attrs, "pwdLastSet")
+                box.setChecked(pwd_last_set == "0")
+                self.must_change_password_checkbox = box
             else:
                 box.setChecked(bool(flag_values & bitmask))
             box.stateChanged.connect(self.refresh_apply_button_state)
             self.uac_checkboxes.append((box, bitmask))
-            layout.addWidget(box)
+            options_layout.addWidget(box)
+
+        supported_types_raw = self._single_attr(attrs, "msDS-SupportedEncryptionTypes")
+        try:
+            self.current_supported_encryption_types = int(supported_types_raw) if supported_types_raw else 0
+        except ValueError:
+            self.current_supported_encryption_types = 0
+        self.original_supported_encryption_types = self.current_supported_encryption_types
+
+        self.supports_aes128_checkbox = QCheckBox("This account supports Kerberos AES 128 bit encryption")
+        self.supports_aes128_checkbox.setChecked(bool(self.current_supported_encryption_types & 0x08))
+        self.supports_aes128_checkbox.stateChanged.connect(self.refresh_apply_button_state)
+        options_layout.addWidget(self.supports_aes128_checkbox)
+
+        self.supports_aes256_checkbox = QCheckBox("This account supports Kerberos AIE 256 bit encryption")
+        self.supports_aes256_checkbox.setChecked(bool(self.current_supported_encryption_types & 0x10))
+        self.supports_aes256_checkbox.stateChanged.connect(self.refresh_apply_button_state)
+        options_layout.addWidget(self.supports_aes256_checkbox)
+        options_layout.addStretch()
+
+        options_scroll = QScrollArea()
+        options_scroll.setWidgetResizable(True)
+        options_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        options_scroll.setWidget(options_container)
+        options_scroll.setMinimumHeight(160)
+        layout.addWidget(options_scroll)
+
+        expires_label = QLabel("Account expires")
+        layout.addWidget(expires_label)
+
+        self.never_expires_radio = QRadioButton("Never")
+        self.end_of_radio = QRadioButton("End of:")
+        self.never_expires_radio.toggled.connect(self._on_account_expires_mode_changed)
+        self.end_of_radio.toggled.connect(self._on_account_expires_mode_changed)
+
+        expires_raw = self._single_attr(attrs, "accountExpires")
+        self.original_account_expires_raw = expires_raw
+        self.current_account_expires_raw = expires_raw
+
+        expires_row_1 = QHBoxLayout()
+        expires_row_1.addWidget(self.never_expires_radio)
+        expires_row_1.addStretch()
+        layout.addLayout(expires_row_1)
+
+        expires_row_2 = QHBoxLayout()
+        expires_row_2.addWidget(self.end_of_radio)
+        self.account_expires_date = QDateTimeEdit()
+        self.account_expires_date.setCalendarPopup(True)
+        self.account_expires_date.setDisplayFormat("yyyy-MM-dd")
+        self.account_expires_date.dateTimeChanged.connect(self.refresh_apply_button_state)
+        expires_row_2.addWidget(self.account_expires_date)
+        expires_row_2.addStretch()
+        layout.addLayout(expires_row_2)
+
+        expires_value_int = 0
+        try:
+            expires_value_int = int(expires_raw) if expires_raw else 0
+        except ValueError:
+            expires_value_int = 0
+        if expires_value_int in (0, 9223372036854775807):
+            self.never_expires_radio.setChecked(True)
+            self.account_expires_date.setDateTime(QDateTime.currentDateTime())
+        else:
+            dt = QDateTime.fromMSecsSinceEpoch((expires_value_int - 116444736000000000) // 10000, Qt.UTC).toLocalTime()
+            if dt.isValid():
+                self.account_expires_date.setDateTime(dt)
+            else:
+                self.account_expires_date.setDateTime(QDateTime.currentDateTime())
+            self.end_of_radio.setChecked(True)
+        self._on_account_expires_mode_changed()
 
         layout.addStretch()
         return tab
@@ -3928,20 +4346,44 @@ class UserPropertiesDialog(QDialog):
 
         for box, bitmask in self.uac_checkboxes:
             checked = box.isChecked()
-            if bitmask == 0x0010:
-                if (not checked) and self.initially_locked:
-                    should_unlock = True
+            if bitmask == 0:
                 continue
             if checked:
                 new_uac |= bitmask
             else:
                 new_uac &= ~bitmask
 
+        if self.locked_out_checkbox and self.initially_locked and self.locked_out_checkbox.isEnabled():
+            should_unlock = self.locked_out_checkbox.isChecked()
+
         return new_uac, should_unlock
 
     def has_pending_changes(self) -> bool:
         edited_uac, should_unlock = self._edited_uac_and_unlock()
         if edited_uac != self.current_uac_value or should_unlock:
+            return True
+
+        if self.must_change_password_checkbox:
+            must_change = self.must_change_password_checkbox.isChecked()
+            original_pwd_last_set = self._single_attr(self.original_attribute_values, "pwdLastSet")
+            if must_change != (original_pwd_last_set == "0"):
+                return True
+
+        encryption_types = self.current_supported_encryption_types
+        if self.supports_aes128_checkbox:
+            if self.supports_aes128_checkbox.isChecked():
+                encryption_types |= 0x08
+            else:
+                encryption_types &= ~0x08
+        if self.supports_aes256_checkbox:
+            if self.supports_aes256_checkbox.isChecked():
+                encryption_types |= 0x10
+            else:
+                encryption_types &= ~0x10
+        if encryption_types != self.current_supported_encryption_types:
+            return True
+
+        if self._current_account_expires_raw() != self.current_account_expires_raw:
             return True
 
         current_groups = sorted(self._current_member_of_dns(), key=str.lower)
@@ -3964,20 +4406,46 @@ class UserPropertiesDialog(QDialog):
             self.apply_button.setEnabled(self.has_pending_changes())
 
     def apply_account_changes(self) -> None:
-        for box, bitmask in self.uac_checkboxes:
-            if bitmask == 0x0010 and box.isChecked() and not self.initially_locked:
-                box.setChecked(False)
-
         new_uac, should_unlock = self._edited_uac_and_unlock()
 
         if new_uac != self.current_uac_value:
             self.ldap.set_user_account_control(self.user_obj.dn, new_uac)
             self.current_uac_value = new_uac
-            self.uac_value_line.setText(str(new_uac))
 
         if should_unlock:
             self.ldap.unlock_account(self.user_obj.dn)
             self.initially_locked = False
+            if self.locked_out_checkbox:
+                self.locked_out_checkbox.setChecked(False)
+                self.locked_out_checkbox.setEnabled(False)
+
+        if self.must_change_password_checkbox:
+            must_change = self.must_change_password_checkbox.isChecked()
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, "pwdLastSet", ["0"] if must_change else ["-1"])
+            self.attribute_values["pwdLastSet"] = ["0"] if must_change else ["-1"]
+            self.original_attribute_values["pwdLastSet"] = list(self.attribute_values["pwdLastSet"])
+
+        encryption_types = self.current_supported_encryption_types
+        if self.supports_aes128_checkbox:
+            if self.supports_aes128_checkbox.isChecked():
+                encryption_types |= 0x08
+            else:
+                encryption_types &= ~0x08
+        if self.supports_aes256_checkbox:
+            if self.supports_aes256_checkbox.isChecked():
+                encryption_types |= 0x10
+            else:
+                encryption_types &= ~0x10
+        if encryption_types != self.current_supported_encryption_types:
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, "msDS-SupportedEncryptionTypes", [str(encryption_types)])
+            self.current_supported_encryption_types = encryption_types
+            self.original_supported_encryption_types = encryption_types
+
+        account_expires_raw = self._current_account_expires_raw()
+        if account_expires_raw != self.current_account_expires_raw:
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, "accountExpires", [account_expires_raw])
+            self.current_account_expires_raw = account_expires_raw
+            self.original_account_expires_raw = account_expires_raw
 
     def apply_attribute_changes(self) -> None:
         for attr_name in sorted(self.attribute_values):
@@ -3987,7 +4455,16 @@ class UserPropertiesDialog(QDialog):
             original_values = self.original_attribute_values.get(attr_name, [])
             if current_values == original_values:
                 continue
-            self.ldap.replace_object_attribute_values(self.user_obj.dn, attr_name, current_values)
+            values_to_apply: list[Any] = current_values
+            if attr_name == "logonHours":
+                decoded_values: list[Any] = []
+                for val in current_values:
+                    if isinstance(val, str) and val.startswith("__B64__"):
+                        decoded_values.append(base64.b64decode(val[len("__B64__"):]))
+                    else:
+                        decoded_values.append(val)
+                values_to_apply = decoded_values
+            self.ldap.replace_object_attribute_values(self.user_obj.dn, attr_name, values_to_apply)
             self.original_attribute_values[attr_name] = list(current_values)
 
     def apply_member_of_changes(self) -> None:
@@ -5351,6 +5828,7 @@ class MainWindow(QMainWindow):
         self.main_table_column_widths: list[int] = []
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
+        self.dialog_sizes: dict[str, tuple[int, int]] = {}
         self.show_advanced_features = True
         self.show_empty_attributes = False
         self.current_dn: Optional[str] = None
@@ -5359,6 +5837,7 @@ class MainWindow(QMainWindow):
         self._move_worker: Optional[MoveOperationWorker] = None
         self._move_progress_dialog: Optional[QProgressDialog] = None
         self.load_settings()
+        QApplication.instance().installEventFilter(self)
 
         if self.window_size:
             self.resize(*self.window_size)
@@ -5676,6 +6155,37 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
+    @staticmethod
+    def _dialog_size_key(dialog: QDialog) -> str:
+        class_name = dialog.metaObject().className()
+        if class_name == "QDialog":
+            title = dialog.windowTitle().strip()
+            return f"QDialog::{title}" if title else "QDialog"
+        return class_name
+
+    def eventFilter(self, watched: QObject, event) -> bool:
+        try:
+            if isinstance(watched, QDialog) and watched.parent() is not None:
+                if isinstance(watched, (QMessageBox, QInputDialog)):
+                    return super().eventFilter(watched, event)
+                key = self._dialog_size_key(watched)
+                if event.type() == QEvent.Show:
+                    saved_size = self.dialog_sizes.get(key)
+                    if saved_size and saved_size[0] > 0 and saved_size[1] > 0:
+                        width = min(max(saved_size[0], 100), 4096)
+                        height = min(max(saved_size[1], 100), 4096)
+                        watched.resize(width, height)
+                elif event.type() == QEvent.Close:
+                    self.dialog_sizes[key] = (watched.width(), watched.height())
+                    if hasattr(self, "table") and hasattr(self, "splitter"):
+                        try:
+                            self.save_settings()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return super().eventFilter(watched, event)
+
     def load_settings(self) -> None:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -5755,6 +6265,21 @@ class MainWindow(QMainWindow):
                     continue
             self.main_splitter_sizes = parsed_splitter_sizes
 
+        dialog_sizes_raw = data.get("dialog_sizes", {})
+        if isinstance(dialog_sizes_raw, dict):
+            parsed_dialog_sizes: dict[str, tuple[int, int]] = {}
+            for key, value in dialog_sizes_raw.items():
+                if not isinstance(key, str) or not isinstance(value, dict):
+                    continue
+                try:
+                    width = int(value.get("width", 0))
+                    height = int(value.get("height", 0))
+                except (TypeError, ValueError):
+                    continue
+                if width > 0 and height > 0:
+                    parsed_dialog_sizes[key] = (width, height)
+            self.dialog_sizes = parsed_dialog_sizes
+
     def save_settings(self) -> None:
         os.makedirs(CONFIG_DIR, exist_ok=True)
         data = {
@@ -5780,6 +6305,10 @@ class MainWindow(QMainWindow):
             "window_width": self.width(),
             "window_height": self.height(),
             "main_splitter_sizes": self.splitter.sizes(),
+            "dialog_sizes": {
+                key: {"width": size[0], "height": size[1]}
+                for key, size in self.dialog_sizes.items()
+            },
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
