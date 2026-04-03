@@ -795,6 +795,19 @@ class LdapManager:
 
         return contexts
 
+    def keepalive(self) -> bool:
+        if not self.conn:
+            return False
+
+        self.conn.search(
+            search_base="",
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["defaultNamingContext"],
+            size_limit=1,
+        )
+        return True
+
     def get_default_naming_context(self) -> Optional[str]:
         partitions = self.get_directory_partitions()
         default_nc = partitions.get("default_naming_context")
@@ -5833,6 +5846,8 @@ class MainWindow(QMainWindow):
         self.show_empty_attributes = False
         self.current_dn: Optional[str] = None
         self.pending_auto_connect = False
+        self.keepalive_interval_ms = 120000
+        self._keepalive_running = False
         self._move_thread: Optional[QThread] = None
         self._move_worker: Optional[MoveOperationWorker] = None
         self._move_progress_dialog: Optional[QProgressDialog] = None
@@ -5964,6 +5979,11 @@ class MainWindow(QMainWindow):
         self.refresh_advanced_features_ui()
         self.update_status_bar()
 
+        self.keepalive_timer = QTimer(self)
+        self.keepalive_timer.setInterval(self.keepalive_interval_ms)
+        self.keepalive_timer.timeout.connect(self.run_keepalive)
+        self.keepalive_timer.start()
+
         if self.auto_connect and self.saved_host:
             self.pending_auto_connect = True
 
@@ -6056,6 +6076,28 @@ class MainWindow(QMainWindow):
                 port=self.saved_port,
             )
         self.reset_connection_alert()
+
+    def run_keepalive(self) -> None:
+        if self._keepalive_running:
+            return
+        if not self.ldap.conn:
+            return
+
+        self._keepalive_running = True
+        try:
+            self.ldap.keepalive()
+        except Exception as error:
+            if not self.is_connection_error(error) or not self.can_attempt_reconnect():
+                return
+            try:
+                self.reconnect()
+                self.statusBar().showMessage("LDAP connection was refreshed after idle timeout.")
+            except Exception:
+                self.show_connection_alert_once(
+                    "Connection to the domain controller was lost. Please reconnect."
+                )
+        finally:
+            self._keepalive_running = False
 
     def with_connection_retry(self, action, reconnect_message: str):
         try:
