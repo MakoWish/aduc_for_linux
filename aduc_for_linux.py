@@ -116,6 +116,19 @@ KEYRING_SERVICE_NAME = "aduc-for-linux"
 
 
 
+def first_text_value(values: Any, default: str = "") -> str:
+    if isinstance(values, (list, tuple)):
+        if not values:
+            return default
+        value = values[0]
+    else:
+        value = values
+
+    if value is None:
+        return default
+    return str(value)
+
+
 @dataclass
 class ConnectionProfile:
     name: str
@@ -5002,10 +5015,10 @@ class GroupPropertiesDialog(QDialog):
         self.attrs = attrs
         self.search_base = search_base
         self.original_member_dns: list[str] = []
-        self.original_sam_name = attrs.get("sAMAccountName", [""])[0]
-        self.original_description = attrs.get("description", [""])[0]
-        self.original_email = attrs.get("mail", [""])[0]
-        self.original_managed_by = attrs.get("managedBy", [""])[0]
+        self.original_sam_name = first_text_value(attrs.get("sAMAccountName"))
+        self.original_description = first_text_value(attrs.get("description"))
+        self.original_email = first_text_value(attrs.get("mail"))
+        self.original_managed_by = first_text_value(attrs.get("managedBy"))
         self.original_attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.selected_attribute: Optional[str] = None
@@ -5019,9 +5032,9 @@ class GroupPropertiesDialog(QDialog):
 
         general = QWidget()
         general_layout = QFormLayout(general)
-        self.sam_name_edit = QLineEdit(attrs.get("sAMAccountName", [""])[0])
-        self.description_edit = QLineEdit(attrs.get("description", [""])[0])
-        self.email_edit = QLineEdit(attrs.get("mail", [""])[0])
+        self.sam_name_edit = QLineEdit(first_text_value(attrs.get("sAMAccountName")))
+        self.description_edit = QLineEdit(first_text_value(attrs.get("description")))
+        self.email_edit = QLineEdit(first_text_value(attrs.get("mail")))
         general_layout.addRow("Group name (pre-Windows 2000):", self.sam_name_edit)
         general_layout.addRow("Description:", self.description_edit)
         general_layout.addRow("E-mail:", self.email_edit)
@@ -5063,15 +5076,15 @@ class GroupPropertiesDialog(QDialog):
 
         managed_by_tab = QWidget()
         managed_by_layout = QFormLayout(managed_by_tab)
-        self.managed_by_edit = QLineEdit(attrs.get("managedBy", [""])[0])
+        self.managed_by_edit = QLineEdit(first_text_value(attrs.get("managedBy")))
         managed_by_layout.addRow("Name:", self.managed_by_edit)
         tabs.addTab(managed_by_tab, "Managed By")
 
         object_tab = QWidget()
         object_layout = QFormLayout(object_tab)
         canonical_name = self.dn_to_canonical_name(group_obj.dn)
-        created = attrs.get("whenCreated", [""])[0]
-        modified = attrs.get("whenChanged", [""])[0]
+        created = first_text_value(attrs.get("whenCreated"))
+        modified = first_text_value(attrs.get("whenChanged"))
         object_layout.addRow("Canonical name of object:", QLabel(canonical_name))
         object_layout.addRow("Object class:", QLabel("Group"))
         object_layout.addRow("Created:", QLabel(created))
@@ -6213,9 +6226,14 @@ class MainWindow(QMainWindow):
                 key = self._dialog_size_key(watched)
                 if event.type() == QEvent.Show:
                     saved_size = self.dialog_sizes.get(key)
-                    if saved_size and saved_size[0] > 0 and saved_size[1] > 0:
-                        width = min(max(saved_size[0], 100), 4096)
-                        height = min(max(saved_size[1], 100), 4096)
+                    if (
+                        isinstance(saved_size, (tuple, list))
+                        and len(saved_size) >= 2
+                        and int(saved_size[0]) > 0
+                        and int(saved_size[1]) > 0
+                    ):
+                        width = min(max(int(saved_size[0]), 100), 4096)
+                        height = min(max(int(saved_size[1]), 100), 4096)
                         watched.resize(width, height)
                 elif event.type() == QEvent.Close:
                     self.dialog_sizes[key] = (watched.width(), watched.height())
