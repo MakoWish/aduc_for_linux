@@ -20,7 +20,7 @@ from typing import Any, Optional
 from contextlib import contextmanager
 
 from PySide6.QtCore import QDateTime, QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
-from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -114,6 +114,19 @@ SEARCH_FILTER_OPTIONS = [
 
 KEYRING_SERVICE_NAME = "aduc-for-linux"
 
+
+
+def first_text_value(values: Any, default: str = "") -> str:
+    if isinstance(values, (list, tuple)):
+        if not values:
+            return default
+        value = values[0]
+    else:
+        value = values
+
+    if value is None:
+        return default
+    return str(value)
 
 
 @dataclass
@@ -794,6 +807,19 @@ class LdapManager:
                 contexts.append(value)
 
         return contexts
+
+    def keepalive(self) -> bool:
+        if not self.conn:
+            return False
+
+        self.conn.search(
+            search_base="",
+            search_filter="(objectClass=*)",
+            search_scope=BASE,
+            attributes=["defaultNamingContext"],
+            size_limit=1,
+        )
+        return True
 
     def get_default_naming_context(self) -> Optional[str]:
         partitions = self.get_directory_partitions()
@@ -4989,10 +5015,10 @@ class GroupPropertiesDialog(QDialog):
         self.attrs = attrs
         self.search_base = search_base
         self.original_member_dns: list[str] = []
-        self.original_sam_name = attrs.get("sAMAccountName", [""])[0]
-        self.original_description = attrs.get("description", [""])[0]
-        self.original_email = attrs.get("mail", [""])[0]
-        self.original_managed_by = attrs.get("managedBy", [""])[0]
+        self.original_sam_name = first_text_value(attrs.get("sAMAccountName"))
+        self.original_description = first_text_value(attrs.get("description"))
+        self.original_email = first_text_value(attrs.get("mail"))
+        self.original_managed_by = first_text_value(attrs.get("managedBy"))
         self.original_attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.attribute_values: dict[str, list[str]] = {k: [str(v) for v in vals] for k, vals in attrs.items()}
         self.selected_attribute: Optional[str] = None
@@ -5006,9 +5032,9 @@ class GroupPropertiesDialog(QDialog):
 
         general = QWidget()
         general_layout = QFormLayout(general)
-        self.sam_name_edit = QLineEdit(attrs.get("sAMAccountName", [""])[0])
-        self.description_edit = QLineEdit(attrs.get("description", [""])[0])
-        self.email_edit = QLineEdit(attrs.get("mail", [""])[0])
+        self.sam_name_edit = QLineEdit(first_text_value(attrs.get("sAMAccountName")))
+        self.description_edit = QLineEdit(first_text_value(attrs.get("description")))
+        self.email_edit = QLineEdit(first_text_value(attrs.get("mail")))
         general_layout.addRow("Group name (pre-Windows 2000):", self.sam_name_edit)
         general_layout.addRow("Description:", self.description_edit)
         general_layout.addRow("E-mail:", self.email_edit)
@@ -5050,15 +5076,15 @@ class GroupPropertiesDialog(QDialog):
 
         managed_by_tab = QWidget()
         managed_by_layout = QFormLayout(managed_by_tab)
-        self.managed_by_edit = QLineEdit(attrs.get("managedBy", [""])[0])
+        self.managed_by_edit = QLineEdit(first_text_value(attrs.get("managedBy")))
         managed_by_layout.addRow("Name:", self.managed_by_edit)
         tabs.addTab(managed_by_tab, "Managed By")
 
         object_tab = QWidget()
         object_layout = QFormLayout(object_tab)
         canonical_name = self.dn_to_canonical_name(group_obj.dn)
-        created = attrs.get("whenCreated", [""])[0]
-        modified = attrs.get("whenChanged", [""])[0]
+        created = first_text_value(attrs.get("whenCreated"))
+        modified = first_text_value(attrs.get("whenChanged"))
         object_layout.addRow("Canonical name of object:", QLabel(canonical_name))
         object_layout.addRow("Object class:", QLabel("Group"))
         object_layout.addRow("Created:", QLabel(created))
@@ -5829,10 +5855,13 @@ class MainWindow(QMainWindow):
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
         self.dialog_sizes: dict[str, tuple[int, int]] = {}
+        self._resized_dialog_keys: set[str] = set()
         self.show_advanced_features = True
         self.show_empty_attributes = False
         self.current_dn: Optional[str] = None
         self.pending_auto_connect = False
+        self.keepalive_interval_ms = 120000
+        self._keepalive_running = False
         self._move_thread: Optional[QThread] = None
         self._move_worker: Optional[MoveOperationWorker] = None
         self._move_progress_dialog: Optional[QProgressDialog] = None
@@ -5964,6 +5993,11 @@ class MainWindow(QMainWindow):
         self.refresh_advanced_features_ui()
         self.update_status_bar()
 
+        self.keepalive_timer = QTimer(self)
+        self.keepalive_timer.setInterval(self.keepalive_interval_ms)
+        self.keepalive_timer.timeout.connect(self.run_keepalive)
+        self.keepalive_timer.start()
+
         if self.auto_connect and self.saved_host:
             self.pending_auto_connect = True
 
@@ -6056,6 +6090,28 @@ class MainWindow(QMainWindow):
                 port=self.saved_port,
             )
         self.reset_connection_alert()
+
+    def run_keepalive(self) -> None:
+        if self._keepalive_running:
+            return
+        if not self.ldap.conn:
+            return
+
+        self._keepalive_running = True
+        try:
+            self.ldap.keepalive()
+        except Exception as error:
+            if not self.is_connection_error(error) or not self.can_attempt_reconnect():
+                return
+            try:
+                self.reconnect()
+                self.statusBar().showMessage("LDAP connection was refreshed after idle timeout.")
+            except Exception:
+                self.show_connection_alert_once(
+                    "Connection to the domain controller was lost. Please reconnect."
+                )
+        finally:
+            self._keepalive_running = False
 
     def with_connection_retry(self, action, reconnect_message: str):
         try:
@@ -6170,18 +6226,29 @@ class MainWindow(QMainWindow):
                     return super().eventFilter(watched, event)
                 key = self._dialog_size_key(watched)
                 if event.type() == QEvent.Show:
+                    self._resized_dialog_keys.discard(key)
                     saved_size = self.dialog_sizes.get(key)
-                    if saved_size and saved_size[0] > 0 and saved_size[1] > 0:
-                        width = min(max(saved_size[0], 100), 4096)
-                        height = min(max(saved_size[1], 100), 4096)
+                    if (
+                        isinstance(saved_size, (tuple, list))
+                        and len(saved_size) >= 2
+                        and int(saved_size[0]) > 0
+                        and int(saved_size[1]) > 0
+                    ):
+                        width = min(max(int(saved_size[0]), 100), 4096)
+                        height = min(max(int(saved_size[1]), 100), 4096)
                         watched.resize(width, height)
+                elif event.type() == QEvent.Resize:
+                    if event.spontaneous():
+                        self._resized_dialog_keys.add(key)
                 elif event.type() == QEvent.Close:
-                    self.dialog_sizes[key] = (watched.width(), watched.height())
-                    if hasattr(self, "table") and hasattr(self, "splitter"):
-                        try:
-                            self.save_settings()
-                        except Exception:
-                            pass
+                    if key in self._resized_dialog_keys:
+                        self.dialog_sizes[key] = (watched.width(), watched.height())
+                        if hasattr(self, "table") and hasattr(self, "splitter"):
+                            try:
+                                self.save_settings()
+                            except Exception:
+                                pass
+                    self._resized_dialog_keys.discard(key)
         except Exception:
             pass
         return super().eventFilter(watched, event)
@@ -7783,8 +7850,28 @@ class StartupSplash(QSplashScreen):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.center_on_active_screen()
+        QTimer.singleShot(0, self.center_on_active_screen)
         if self._start_time == 0.0:
             self._start_time = time.monotonic()
+
+    def center_on_active_screen(self) -> None:
+        screen = QApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setScreen(screen)
+
+        geometry = screen.geometry()
+        x = geometry.x() + (geometry.width() - self.width()) // 2
+        y = geometry.y() + (geometry.height() - self.height()) // 2
+        self.move(x, y)
 
     def _start_fade(self) -> None:
         if self._fade_started:
