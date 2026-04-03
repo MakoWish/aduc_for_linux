@@ -20,7 +20,7 @@ from typing import Any, Optional
 from contextlib import contextmanager
 
 from PySide6.QtCore import QDateTime, QMimeData, QObject, QPoint, QThread, Signal, Qt, QTimer, QEventLoop, QPropertyAnimation, QEasingCurve, Property
-from PySide6.QtGui import QAction, QBrush, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -7850,8 +7850,28 @@ class StartupSplash(QSplashScreen):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.center_on_active_screen()
+        QTimer.singleShot(0, self.center_on_active_screen)
         if self._start_time == 0.0:
             self._start_time = time.monotonic()
+
+    def center_on_active_screen(self) -> None:
+        screen = QApplication.screenAt(QCursor.pos())
+        if screen is None:
+            screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setScreen(screen)
+
+        geometry = screen.geometry()
+        x = geometry.x() + (geometry.width() - self.width()) // 2
+        y = geometry.y() + (geometry.height() - self.height()) // 2
+        self.move(x, y)
 
     def _start_fade(self) -> None:
         if self._fade_started:
