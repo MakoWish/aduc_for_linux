@@ -5855,6 +5855,7 @@ class MainWindow(QMainWindow):
         self.window_size: Optional[tuple[int, int]] = None
         self.main_splitter_sizes: list[int] = []
         self.dialog_sizes: dict[str, tuple[int, int]] = {}
+        self._resized_dialog_keys: set[str] = set()
         self.show_advanced_features = True
         self.show_empty_attributes = False
         self.current_dn: Optional[str] = None
@@ -6225,6 +6226,7 @@ class MainWindow(QMainWindow):
                     return super().eventFilter(watched, event)
                 key = self._dialog_size_key(watched)
                 if event.type() == QEvent.Show:
+                    self._resized_dialog_keys.discard(key)
                     saved_size = self.dialog_sizes.get(key)
                     if (
                         isinstance(saved_size, (tuple, list))
@@ -6235,13 +6237,18 @@ class MainWindow(QMainWindow):
                         width = min(max(int(saved_size[0]), 100), 4096)
                         height = min(max(int(saved_size[1]), 100), 4096)
                         watched.resize(width, height)
+                elif event.type() == QEvent.Resize:
+                    if event.spontaneous():
+                        self._resized_dialog_keys.add(key)
                 elif event.type() == QEvent.Close:
-                    self.dialog_sizes[key] = (watched.width(), watched.height())
-                    if hasattr(self, "table") and hasattr(self, "splitter"):
-                        try:
-                            self.save_settings()
-                        except Exception:
-                            pass
+                    if key in self._resized_dialog_keys:
+                        self.dialog_sizes[key] = (watched.width(), watched.height())
+                        if hasattr(self, "table") and hasattr(self, "splitter"):
+                            try:
+                                self.save_settings()
+                            except Exception:
+                                pass
+                    self._resized_dialog_keys.discard(key)
         except Exception:
             pass
         return super().eventFilter(watched, event)
@@ -7843,8 +7850,20 @@ class StartupSplash(QSplashScreen):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.center_on_current_screen()
         if self._start_time == 0.0:
             self._start_time = time.monotonic()
+
+    def center_on_current_screen(self) -> None:
+        screen = self.screen()
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        splash_rect = self.frameGeometry()
+        splash_rect.moveCenter(available.center())
+        self.move(splash_rect.topLeft())
 
     def _start_fade(self) -> None:
         if self._fade_started:
