@@ -3890,7 +3890,7 @@ class UserPropertiesDialog(QDialog):
         self.refresh_apply_button_state()
 
     def configure_logon_hours(self) -> None:
-        day_labels = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        day_labels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
         def _decode_logon_hours(values: list[str]) -> bytes:
             if not values:
@@ -3907,14 +3907,14 @@ class UserPropertiesDialog(QDialog):
             return b"\xff" * 21
 
         def _is_allowed(mask: bytes, ui_day: int, hour: int) -> bool:
-            ad_day = (ui_day + 1) % 7  # AD uses Sunday-first; UI is Monday-first.
+            ad_day = ui_day
             bit_index = (ad_day * 24) + hour
             byte_index = bit_index // 8
             bit_offset = bit_index % 8
             return bool(mask[byte_index] & (1 << bit_offset))
 
         def _set_allowed(mask: bytearray, ui_day: int, hour: int, allowed: bool) -> None:
-            ad_day = (ui_day + 1) % 7
+            ad_day = ui_day
             bit_index = (ad_day * 24) + hour
             byte_index = bit_index // 8
             bit_offset = bit_index % 8
