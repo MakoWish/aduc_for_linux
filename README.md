@@ -1,8 +1,8 @@
 # ADUC for Linux
 
-Python implementation of Microsoft's **Active Directory Users and Computers (ADUC)** for Linux desktops. Manage Microsoft and Samba AD from Linux!
+<img src="image.png" align="right" width="150" alt="ADUC for Linux icon">
 
-<img src="image.png" width="150" alt="ADUC for Linux icon">
+Python implementation of Microsoft's **Active Directory Users and Computers (ADUC)** for Linux desktops. Manage Microsoft and Samba AD from Linux!
 
 ## Index
 
