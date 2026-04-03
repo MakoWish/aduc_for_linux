@@ -3929,7 +3929,7 @@ class UserPropertiesDialog(QDialog):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Logon Hours")
-        dlg.resize(920, 360)
+        dlg.resize(600, 380)
         layout = QVBoxLayout(dlg)
 
         body = QHBoxLayout()
