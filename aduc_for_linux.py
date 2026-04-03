@@ -6164,18 +6164,26 @@ class MainWindow(QMainWindow):
         return class_name
 
     def eventFilter(self, watched: QObject, event) -> bool:
-        if isinstance(watched, QDialog) and watched.parent() is not None:
-            if isinstance(watched, (QMessageBox, QInputDialog)):
-                return super().eventFilter(watched, event)
-            key = self._dialog_size_key(watched)
-            if event.type() == QEvent.Show:
-                saved_size = self.dialog_sizes.get(key)
-                if saved_size and saved_size[0] > 0 and saved_size[1] > 0:
-                    watched.resize(saved_size[0], saved_size[1])
-            elif event.type() == QEvent.Close:
-                self.dialog_sizes[key] = (watched.width(), watched.height())
-                if hasattr(self, "table") and hasattr(self, "splitter"):
-                    self.save_settings()
+        try:
+            if isinstance(watched, QDialog) and watched.parent() is not None:
+                if isinstance(watched, (QMessageBox, QInputDialog)):
+                    return super().eventFilter(watched, event)
+                key = self._dialog_size_key(watched)
+                if event.type() == QEvent.Show:
+                    saved_size = self.dialog_sizes.get(key)
+                    if saved_size and saved_size[0] > 0 and saved_size[1] > 0:
+                        width = min(max(saved_size[0], 100), 4096)
+                        height = min(max(saved_size[1], 100), 4096)
+                        watched.resize(width, height)
+                elif event.type() == QEvent.Close:
+                    self.dialog_sizes[key] = (watched.width(), watched.height())
+                    if hasattr(self, "table") and hasattr(self, "splitter"):
+                        try:
+                            self.save_settings()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         return super().eventFilter(watched, event)
 
     def load_settings(self) -> None:
