@@ -6043,7 +6043,25 @@ class MainWindow(QMainWindow):
     def icon_for_object(self, obj: LdapObject) -> QIcon:
         return icon_for_directory_object(self.style(), obj)
 
+    def try_recover_connection(self, error: Exception | str) -> bool:
+        message = str(error)
+        if not self.is_connection_error(Exception(message)):
+            return False
+        if not self.can_attempt_reconnect():
+            return False
+
+        try:
+            self.reconnect()
+            self.statusBar().showMessage(
+                "LDAP connection was refreshed after idle timeout. Please retry your last action."
+            )
+            return True
+        except Exception:
+            return False
+
     def show_error(self, title: str, message: str) -> None:
+        if self.try_recover_connection(message):
+            return
         QMessageBox.critical(self, title, message)
 
     @staticmethod
