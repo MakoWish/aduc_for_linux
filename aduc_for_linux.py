@@ -6748,6 +6748,13 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            keepalive_ok = self.with_connection_retry(
+                self.ldap.keepalive,
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if keepalive_ok is None:
+                return
+
             results = self.with_connection_retry(
                 lambda: self.ldap.search_objects(base_dn, term, search_mode=search_mode),
                 "Connection to the domain controller was lost. Please reconnect.",
