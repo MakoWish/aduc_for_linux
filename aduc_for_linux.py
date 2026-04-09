@@ -6066,11 +6066,19 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def is_connection_error(error: Exception) -> bool:
-        text = str(error).lower()
+        text_parts = [str(error)]
+        args = getattr(error, "args", ())
+        if isinstance(args, tuple):
+            for arg in args:
+                text_parts.append(str(arg))
+        text = " ".join(text_parts).lower()
+        error_type = type(error).__name__.lower()
         connection_markers = [
             "socket",
             "connection",
             "eof occurred",
+            "violation of protocol",
+            "ssl",
             "session terminated",
             "broken pipe",
             "server down",
@@ -6078,7 +6086,17 @@ class MainWindow(QMainWindow):
             "connection reset",
             "can't contact ldap server",
         ]
-        return any(marker in text for marker in connection_markers)
+        if any(marker in text for marker in connection_markers):
+            return True
+
+        return any(
+            marker in error_type
+            for marker in [
+                "ldapsocket",
+                "ldapcommunicationerror",
+                "ldapsessionterminatedbyservererror",
+            ]
+        )
 
     def can_attempt_reconnect(self) -> bool:
         if not self.saved_host:
@@ -6135,13 +6153,16 @@ class MainWindow(QMainWindow):
         try:
             return action()
         except Exception as first_error:
-            if not self.is_connection_error(first_error) or not self.can_attempt_reconnect():
+            if not self.is_connection_error(first_error):
                 raise
 
         try:
-            self.reconnect()
+            if self.can_attempt_reconnect():
+                self.reconnect()
             return action()
-        except Exception:
+        except Exception as retry_error:
+            if not self.is_connection_error(retry_error):
+                raise
             self.show_connection_alert_once(reconnect_message)
             return None
 
