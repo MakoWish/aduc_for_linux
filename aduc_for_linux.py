@@ -6748,7 +6748,12 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            results = self.ldap.search_objects(base_dn, term, search_mode=search_mode)
+            results = self.with_connection_retry(
+                lambda: self.ldap.search_objects(base_dn, term, search_mode=search_mode),
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if results is None:
+                return
         except Exception as e:
             self.show_error("Search failed", str(e))
             return
