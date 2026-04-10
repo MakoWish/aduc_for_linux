@@ -816,7 +816,7 @@ class LdapManager:
             search_base="",
             search_filter="(objectClass=*)",
             search_scope=BASE,
-            attributes=["defaultNamingContext"],
+            attributes=["1.1"],
             size_limit=1,
         )
         return True
