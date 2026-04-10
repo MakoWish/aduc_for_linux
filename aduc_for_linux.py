@@ -7397,6 +7397,17 @@ class MainWindow(QMainWindow):
         if not item:
             return
 
+        try:
+            keepalive_ok = self.with_connection_retry(
+                self.ldap.keepalive,
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if keepalive_ok is None:
+                return
+        except Exception as e:
+            self.show_error("Connection issue", str(e))
+            return
+
         obj = self.ldap_object_from_tree_item(item)
         if not obj:
             return
