@@ -816,7 +816,7 @@ class LdapManager:
             search_base="",
             search_filter="(objectClass=*)",
             search_scope=BASE,
-            attributes=["defaultNamingContext"],
+            attributes=["1.1"],
             size_limit=1,
         )
         return True
@@ -6043,16 +6043,43 @@ class MainWindow(QMainWindow):
     def icon_for_object(self, obj: LdapObject) -> QIcon:
         return icon_for_directory_object(self.style(), obj)
 
+    def try_recover_connection(self, error: Exception | str) -> bool:
+        message = str(error)
+        if not self.is_connection_error(Exception(message)):
+            return False
+
+        try:
+            if self.can_attempt_reconnect():
+                self.reconnect()
+            elif not self.try_rebind_existing_connection():
+                return False
+            self.statusBar().showMessage(
+                "LDAP connection was refreshed after idle timeout. Please retry your last action."
+            )
+            return True
+        except Exception:
+            return False
+
     def show_error(self, title: str, message: str) -> None:
+        if self.try_recover_connection(message):
+            return
         QMessageBox.critical(self, title, message)
 
     @staticmethod
     def is_connection_error(error: Exception) -> bool:
-        text = str(error).lower()
+        text_parts = [str(error)]
+        args = getattr(error, "args", ())
+        if isinstance(args, tuple):
+            for arg in args:
+                text_parts.append(str(arg))
+        text = " ".join(text_parts).lower()
+        error_type = type(error).__name__.lower()
         connection_markers = [
             "socket",
             "connection",
             "eof occurred",
+            "violation of protocol",
+            "ssl",
             "session terminated",
             "broken pipe",
             "server down",
@@ -6060,7 +6087,17 @@ class MainWindow(QMainWindow):
             "connection reset",
             "can't contact ldap server",
         ]
-        return any(marker in text for marker in connection_markers)
+        if any(marker in text for marker in connection_markers):
+            return True
+
+        return any(
+            marker in error_type
+            for marker in [
+                "ldapsocket",
+                "ldapcommunicationerror",
+                "ldapsessionterminatedbyservererror",
+            ]
+        )
 
     def can_attempt_reconnect(self) -> bool:
         if not self.saved_host:
@@ -6091,6 +6128,19 @@ class MainWindow(QMainWindow):
             )
         self.reset_connection_alert()
 
+    def try_rebind_existing_connection(self) -> bool:
+        if not self.ldap.conn:
+            return False
+        rebind = getattr(self.ldap.conn, "rebind", None)
+        if not callable(rebind):
+            return False
+        try:
+            result = rebind()
+            self.reset_connection_alert()
+            return bool(result)
+        except Exception:
+            return False
+
     def run_keepalive(self) -> None:
         if self._keepalive_running:
             return
@@ -6101,10 +6151,13 @@ class MainWindow(QMainWindow):
         try:
             self.ldap.keepalive()
         except Exception as error:
-            if not self.is_connection_error(error) or not self.can_attempt_reconnect():
+            if not self.is_connection_error(error):
                 return
             try:
-                self.reconnect()
+                if self.can_attempt_reconnect():
+                    self.reconnect()
+                elif not self.try_rebind_existing_connection():
+                    return
                 self.statusBar().showMessage("LDAP connection was refreshed after idle timeout.")
             except Exception:
                 self.show_connection_alert_once(
@@ -6117,13 +6170,18 @@ class MainWindow(QMainWindow):
         try:
             return action()
         except Exception as first_error:
-            if not self.is_connection_error(first_error) or not self.can_attempt_reconnect():
+            if not self.is_connection_error(first_error):
                 raise
 
         try:
-            self.reconnect()
+            if self.can_attempt_reconnect():
+                self.reconnect()
+            elif not self.try_rebind_existing_connection():
+                raise first_error
             return action()
-        except Exception:
+        except Exception as retry_error:
+            if not self.is_connection_error(retry_error):
+                raise
             self.show_connection_alert_once(reconnect_message)
             return None
 
@@ -6730,7 +6788,19 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            results = self.ldap.search_objects(base_dn, term, search_mode=search_mode)
+            keepalive_ok = self.with_connection_retry(
+                self.ldap.keepalive,
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if keepalive_ok is None:
+                return
+
+            results = self.with_connection_retry(
+                lambda: self.ldap.search_objects(base_dn, term, search_mode=search_mode),
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if results is None:
+                return
         except Exception as e:
             self.show_error("Search failed", str(e))
             return
@@ -7325,6 +7395,17 @@ class MainWindow(QMainWindow):
     def on_tree_context_menu(self, pos) -> None:
         item = self.tree.itemAt(pos)
         if not item:
+            return
+
+        try:
+            keepalive_ok = self.with_connection_retry(
+                self.ldap.keepalive,
+                "Connection to the domain controller was lost. Please reconnect.",
+            )
+            if keepalive_ok is None:
+                return
+        except Exception as e:
+            self.show_error("Connection issue", str(e))
             return
 
         obj = self.ldap_object_from_tree_item(item)
