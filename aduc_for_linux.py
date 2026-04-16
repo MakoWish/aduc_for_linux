@@ -334,6 +334,7 @@ def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
                 "mask": f"0x{mask:08X}",
                 "mask_value": int(mask),
                 "trustee_sid": sid,
+                "raw_ace": bytes(ace_bytes),
             }
         )
 
@@ -2229,6 +2230,8 @@ class SecurityAclEditor(QWidget):
         self.group_sid = ""
         self.original_control = 0x8004
         self.principals: dict[str, dict[str, Any]] = {}
+        self._principal_special: dict[str, dict[str, Any]] = {}
+        self._preserved_aces: list[dict[str, Any]] = []
         self.display_by_sid: dict[str, str] = {}
         self._loading_permissions = False
 
@@ -2320,22 +2323,38 @@ class SecurityAclEditor(QWidget):
         self.group_sid = str(details.get("group_sid", ""))
         self.original_control = int(details.get("control", 0x8004))
         self.principals = {}
+        self._principal_special = {}
+        self._preserved_aces = []
         self.display_by_sid = {}
 
         for ace in details.get("dacl", []):
             sid = str(ace.get("trustee_sid", "")).strip()
+            ace_type = int(ace.get("ace_type", -1))
+            ace_flags = int(ace.get("ace_flags", 0))
+            mask_value = int(ace.get("mask_value", 0))
+            raw_ace = ace.get("raw_ace")
+            is_editable = bool(sid and ace_type in (0x00, 0x01) and ace_flags == 0x00)
+
+            if not is_editable:
+                if isinstance(raw_ace, bytes) and raw_ace:
+                    self._preserved_aces.append({"sid": sid, "raw_ace": raw_ace})
+                if sid:
+                    special = self._principal_special.setdefault(sid, {"has_special_aces": False})
+                    special["has_special_aces"] = True
+                continue
+
             if not sid:
                 continue
             entry = self.principals.setdefault(sid, {"allow": 0, "deny": 0})
-            ace_type = int(ace.get("ace_type", -1))
-            mask_value = int(ace.get("mask_value", 0))
-            if ace_type in (0x00, 0x05):
+            if ace_type == 0x00:
                 entry["allow"] |= mask_value
-            elif ace_type in (0x01, 0x06):
+            elif ace_type == 0x01:
                 entry["deny"] |= mask_value
 
         self.principal_list.clear()
-        for sid in sorted(self.principals.keys()):
+        all_sids = sorted(set(self.principals.keys()) | set(self._principal_special.keys()))
+        for sid in all_sids:
+            self.principals.setdefault(sid, {"allow": 0, "deny": 0})
             label = self.resolve_sid_label(sid)
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, sid)
@@ -2440,17 +2459,25 @@ class SecurityAclEditor(QWidget):
         self.permissions_label.setText(f"Permissions for {current.text().split(' (')[0]}")
         allow_mask = int(data.get("allow", 0))
         deny_mask = int(data.get("deny", 0))
+        special_info = self._principal_special.get(sid, {})
+        has_special_aces = bool(special_info.get("has_special_aces", False))
         allow_unmapped = allow_mask & ~self.MAPPED_PERMISSION_MASK
         deny_unmapped = deny_mask & ~self.MAPPED_PERMISSION_MASK
         allow_full_control = bool(
-            (allow_mask & self.FULL_CONTROL_BIT)
-            or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
-            or ((allow_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            not has_special_aces
+            and (
+                (allow_mask & self.FULL_CONTROL_BIT)
+                or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+                or ((allow_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            )
         )
         deny_full_control = bool(
-            (deny_mask & self.FULL_CONTROL_BIT)
-            or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
-            or ((deny_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            not has_special_aces
+            and (
+                (deny_mask & self.FULL_CONTROL_BIT)
+                or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+                or ((deny_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            )
         )
         self._loading_permissions = True
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
@@ -2460,10 +2487,14 @@ class SecurityAclEditor(QWidget):
                 continue
             self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
             self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
-        has_unmapped = bool(allow_unmapped or deny_unmapped)
+        has_unmapped = bool(allow_unmapped or deny_unmapped or has_special_aces)
         self.permissions_table.setRowHidden(self.special_row_index, not has_unmapped)
-        self.permissions_table.item(self.special_row_index, 1).setCheckState(Qt.Checked if allow_unmapped else Qt.Unchecked)
-        self.permissions_table.item(self.special_row_index, 2).setCheckState(Qt.Checked if deny_unmapped else Qt.Unchecked)
+        self.permissions_table.item(self.special_row_index, 1).setCheckState(
+            Qt.Checked if (allow_unmapped or has_special_aces) else Qt.Unchecked
+        )
+        self.permissions_table.item(self.special_row_index, 2).setCheckState(
+            Qt.Checked if (deny_unmapped or has_special_aces) else Qt.Unchecked
+        )
         self._loading_permissions = False
 
     def on_permission_item_changed(self, item: QTableWidgetItem) -> None:
@@ -2530,13 +2561,17 @@ class SecurityAclEditor(QWidget):
         sid = str(item.data(Qt.UserRole))
         if sid in self.principals:
             del self.principals[sid]
+        if sid in self._principal_special:
+            del self._principal_special[sid]
         self.refresh_principal_list()
         self.changed.emit()
 
     def refresh_principal_list(self, select_sid: str = "") -> None:
         self.principal_list.clear()
         target_row = -1
-        for row, sid in enumerate(sorted(self.principals.keys())):
+        all_sids = sorted(set(self.principals.keys()) | set(self._principal_special.keys()))
+        for row, sid in enumerate(all_sids):
+            self.principals.setdefault(sid, {"allow": 0, "deny": 0})
             label = self.resolve_sid_label(sid)
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, sid)
@@ -2550,6 +2585,13 @@ class SecurityAclEditor(QWidget):
 
     def _build_dacl_bytes(self) -> bytes:
         ace_payloads: list[bytes] = []
+        for ace in self._preserved_aces:
+            sid = str(ace.get("sid", ""))
+            if sid and sid not in self.principals and sid not in self._principal_special:
+                continue
+            raw_ace = ace.get("raw_ace")
+            if isinstance(raw_ace, bytes) and raw_ace:
+                ace_payloads.append(raw_ace)
         for sid in sorted(self.principals.keys()):
             data = self.principals[sid]
             sid_bytes = sid_to_bytes(sid)
