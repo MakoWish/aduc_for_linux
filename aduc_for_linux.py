@@ -14,7 +14,6 @@ import urllib.request
 import ldap3
 import webbrowser
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
@@ -1721,25 +1720,8 @@ class LdapManager:
             return False
 
         class_name = child_class.lower()
-        probe_id = uuid.uuid4().hex
-        rdn_attr = "OU" if class_name == "organizationalunit" else "CN"
-        probe_dn = f"{rdn_attr}=__aduc_probe_{probe_id},{parent_dn}"
-
-        ok = self.conn.add(
-            probe_dn,
-            attributes={
-                "objectClass": ["top", class_name],
-            },
-        )
-        if ok:
-            self.conn.delete(probe_dn)
-            return True
-
-        result_code = int(self.conn.result.get("result", -1))
-        if result_code == 50:
-            return False
-
-        return True
+        allowed_classes = self.get_allowed_child_classes(parent_dn)
+        return class_name in allowed_classes
 
     def rename_object(self, dn: str, new_name: str) -> None:
         if not self.conn:
@@ -7387,13 +7369,8 @@ class MainWindow(QMainWindow):
 
         allowed_actions: set[str] = set()
         for action_name, required_class in CREATABLE_CHILD_CLASS_BY_ACTION.items():
-            if required_class not in allowed_classes:
-                continue
-            try:
-                if self.ldap.can_create_child_class(dn, required_class):
-                    allowed_actions.add(action_name)
-            except Exception:
-                continue
+            if required_class in allowed_classes:
+                allowed_actions.add(action_name)
         return allowed_actions
 
     def add_creation_actions_to_menu(
