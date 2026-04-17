@@ -2446,6 +2446,7 @@ class SecurityAclEditor(QWidget):
         self.remove_btn.setEnabled(current is not None)
         if current is None:
             self.permissions_label.setText("Permissions")
+            self._set_permissions_editable(False)
             self._loading_permissions = True
             for row in range(self.permissions_table.rowCount()):
                 self.permissions_table.item(row, 1).setCheckState(Qt.Unchecked)
@@ -2461,6 +2462,7 @@ class SecurityAclEditor(QWidget):
         deny_mask = int(data.get("deny", 0))
         special_info = self._principal_special.get(sid, {})
         has_special_aces = bool(special_info.get("has_special_aces", False))
+        self._set_permissions_editable(not has_special_aces)
         allow_unmapped = allow_mask & ~self.MAPPED_PERMISSION_MASK
         deny_unmapped = deny_mask & ~self.MAPPED_PERMISSION_MASK
         allow_full_control = bool(
@@ -2496,6 +2498,17 @@ class SecurityAclEditor(QWidget):
             Qt.Checked if (deny_unmapped or has_special_aces) else Qt.Unchecked
         )
         self._loading_permissions = False
+
+    def _set_permissions_editable(self, editable: bool) -> None:
+        for row in range(len(self.PERMISSIONS)):
+            for col in (1, 2):
+                item = self.permissions_table.item(row, col)
+                if item is None:
+                    continue
+                if editable:
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                else:
+                    item.setFlags(Qt.ItemIsEnabled)
 
     def on_permission_item_changed(self, item: QTableWidgetItem) -> None:
         if self._loading_permissions:
@@ -2634,6 +2647,10 @@ class SecurityAclEditor(QWidget):
         self._capture_permission_checkboxes_for_sid(sid)
 
     def _capture_permission_checkboxes_for_sid(self, sid: str) -> None:
+        special_info = self._principal_special.get(sid, {})
+        if bool(special_info.get("has_special_aces", False)):
+            return
+
         allow_mask = 0
         deny_mask = 0
         allow_full_control_checked = self.permissions_table.item(self.FULL_CONTROL_INDEX, 1).checkState() == Qt.Checked
