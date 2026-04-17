@@ -6928,7 +6928,8 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted:
+            self.refresh_current_preserving_view(preferred_dn=obj.dn)
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
         dlg = ResetPasswordDialog(obj.name, self)
@@ -7916,6 +7917,47 @@ class MainWindow(QMainWindow):
 
         if tree_item:
             self.refresh_tree_item_children(tree_item)
+
+    def refresh_current_preserving_view(self, preferred_dn: str = "") -> None:
+        selected_dns: list[str] = []
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            for idx in selection_model.selectedRows():
+                item = self.table.item(idx.row(), 0)
+                if not item:
+                    continue
+                row_obj = item.data(Qt.UserRole)
+                if isinstance(row_obj, LdapObject):
+                    selected_dns.append(row_obj.dn)
+
+        vertical_value = self.table.verticalScrollBar().value()
+        horizontal_value = self.table.horizontalScrollBar().value()
+
+        self.refresh_current()
+
+        target_dns: list[str] = []
+        preferred_dn = preferred_dn.strip()
+        if preferred_dn:
+            target_dns.append(preferred_dn)
+        target_dns.extend(dn for dn in selected_dns if dn and dn not in target_dns)
+
+        if target_dns:
+            for target_dn in target_dns:
+                for row in range(self.table.rowCount()):
+                    item = self.table.item(row, 0)
+                    if not item:
+                        continue
+                    row_obj = item.data(Qt.UserRole)
+                    if isinstance(row_obj, LdapObject) and row_obj.dn == target_dn:
+                        self.table.selectRow(row)
+                        self.table.setCurrentCell(row, 0)
+                        break
+                else:
+                    continue
+                break
+
+        self.table.verticalScrollBar().setValue(vertical_value)
+        self.table.horizontalScrollBar().setValue(horizontal_value)
 
 
 def prompt_for_update_if_available() -> None:
