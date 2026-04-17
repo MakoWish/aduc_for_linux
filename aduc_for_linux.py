@@ -2684,7 +2684,9 @@ class SecurityAclEditor(QWidget):
         return self.principals != self._original_principals
 
     def apply_security_changes(self, reload_after_save: bool = True) -> bool:
-        self._capture_permission_checkboxes()
+        if not self.has_pending_changes():
+            return True
+
         current_item = self.principal_list.currentItem()
         selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
 
