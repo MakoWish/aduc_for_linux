@@ -14,7 +14,6 @@ import urllib.request
 import ldap3
 import webbrowser
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from contextlib import contextmanager
@@ -334,6 +333,7 @@ def parse_relative_security_descriptor(sd_bytes: bytes) -> dict[str, Any]:
                 "mask": f"0x{mask:08X}",
                 "mask_value": int(mask),
                 "trustee_sid": sid,
+                "raw_ace": bytes(ace_bytes),
             }
         )
 
@@ -1720,25 +1720,8 @@ class LdapManager:
             return False
 
         class_name = child_class.lower()
-        probe_id = uuid.uuid4().hex
-        rdn_attr = "OU" if class_name == "organizationalunit" else "CN"
-        probe_dn = f"{rdn_attr}=__aduc_probe_{probe_id},{parent_dn}"
-
-        ok = self.conn.add(
-            probe_dn,
-            attributes={
-                "objectClass": ["top", class_name],
-            },
-        )
-        if ok:
-            self.conn.delete(probe_dn)
-            return True
-
-        result_code = int(self.conn.result.get("result", -1))
-        if result_code == 50:
-            return False
-
-        return True
+        allowed_classes = self.get_allowed_child_classes(parent_dn)
+        return class_name in allowed_classes
 
     def rename_object(self, dn: str, new_name: str) -> None:
         if not self.conn:
@@ -2229,6 +2212,8 @@ class SecurityAclEditor(QWidget):
         self.group_sid = ""
         self.original_control = 0x8004
         self.principals: dict[str, dict[str, Any]] = {}
+        self._principal_special: dict[str, dict[str, Any]] = {}
+        self._preserved_aces: list[dict[str, Any]] = []
         self.display_by_sid: dict[str, str] = {}
         self._loading_permissions = False
 
@@ -2320,22 +2305,38 @@ class SecurityAclEditor(QWidget):
         self.group_sid = str(details.get("group_sid", ""))
         self.original_control = int(details.get("control", 0x8004))
         self.principals = {}
+        self._principal_special = {}
+        self._preserved_aces = []
         self.display_by_sid = {}
 
         for ace in details.get("dacl", []):
             sid = str(ace.get("trustee_sid", "")).strip()
+            ace_type = int(ace.get("ace_type", -1))
+            ace_flags = int(ace.get("ace_flags", 0))
+            mask_value = int(ace.get("mask_value", 0))
+            raw_ace = ace.get("raw_ace")
+            is_editable = bool(sid and ace_type in (0x00, 0x01) and ace_flags == 0x00)
+
+            if not is_editable:
+                if isinstance(raw_ace, bytes) and raw_ace:
+                    self._preserved_aces.append({"sid": sid, "raw_ace": raw_ace})
+                if sid:
+                    special = self._principal_special.setdefault(sid, {"has_special_aces": False})
+                    special["has_special_aces"] = True
+                continue
+
             if not sid:
                 continue
             entry = self.principals.setdefault(sid, {"allow": 0, "deny": 0})
-            ace_type = int(ace.get("ace_type", -1))
-            mask_value = int(ace.get("mask_value", 0))
-            if ace_type in (0x00, 0x05):
+            if ace_type == 0x00:
                 entry["allow"] |= mask_value
-            elif ace_type in (0x01, 0x06):
+            elif ace_type == 0x01:
                 entry["deny"] |= mask_value
 
         self.principal_list.clear()
-        for sid in sorted(self.principals.keys()):
+        all_sids = sorted(set(self.principals.keys()) | set(self._principal_special.keys()))
+        for sid in all_sids:
+            self.principals.setdefault(sid, {"allow": 0, "deny": 0})
             label = self.resolve_sid_label(sid)
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, sid)
@@ -2427,6 +2428,7 @@ class SecurityAclEditor(QWidget):
         self.remove_btn.setEnabled(current is not None)
         if current is None:
             self.permissions_label.setText("Permissions")
+            self._set_permissions_editable(False)
             self._loading_permissions = True
             for row in range(self.permissions_table.rowCount()):
                 self.permissions_table.item(row, 1).setCheckState(Qt.Unchecked)
@@ -2440,17 +2442,26 @@ class SecurityAclEditor(QWidget):
         self.permissions_label.setText(f"Permissions for {current.text().split(' (')[0]}")
         allow_mask = int(data.get("allow", 0))
         deny_mask = int(data.get("deny", 0))
+        special_info = self._principal_special.get(sid, {})
+        has_special_aces = bool(special_info.get("has_special_aces", False))
+        self._set_permissions_editable(not has_special_aces)
         allow_unmapped = allow_mask & ~self.MAPPED_PERMISSION_MASK
         deny_unmapped = deny_mask & ~self.MAPPED_PERMISSION_MASK
         allow_full_control = bool(
-            (allow_mask & self.FULL_CONTROL_BIT)
-            or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
-            or ((allow_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            not has_special_aces
+            and (
+                (allow_mask & self.FULL_CONTROL_BIT)
+                or ((allow_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+                or ((allow_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            )
         )
         deny_full_control = bool(
-            (deny_mask & self.FULL_CONTROL_BIT)
-            or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
-            or ((deny_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            not has_special_aces
+            and (
+                (deny_mask & self.FULL_CONTROL_BIT)
+                or ((deny_mask & self.FULL_CONTROL_EXPANDED_MASK) == self.FULL_CONTROL_EXPANDED_MASK)
+                or ((deny_mask & self.FULL_CONTROL_AD_MASK) == self.FULL_CONTROL_AD_MASK)
+            )
         )
         self._loading_permissions = True
         for row, (_perm_name, bit) in enumerate(self.PERMISSIONS):
@@ -2460,11 +2471,26 @@ class SecurityAclEditor(QWidget):
                 continue
             self.permissions_table.item(row, 1).setCheckState(Qt.Checked if (allow_mask & bit) else Qt.Unchecked)
             self.permissions_table.item(row, 2).setCheckState(Qt.Checked if (deny_mask & bit) else Qt.Unchecked)
-        has_unmapped = bool(allow_unmapped or deny_unmapped)
+        has_unmapped = bool(allow_unmapped or deny_unmapped or has_special_aces)
         self.permissions_table.setRowHidden(self.special_row_index, not has_unmapped)
-        self.permissions_table.item(self.special_row_index, 1).setCheckState(Qt.Checked if allow_unmapped else Qt.Unchecked)
-        self.permissions_table.item(self.special_row_index, 2).setCheckState(Qt.Checked if deny_unmapped else Qt.Unchecked)
+        self.permissions_table.item(self.special_row_index, 1).setCheckState(
+            Qt.Checked if (allow_unmapped or has_special_aces) else Qt.Unchecked
+        )
+        self.permissions_table.item(self.special_row_index, 2).setCheckState(
+            Qt.Checked if (deny_unmapped or has_special_aces) else Qt.Unchecked
+        )
         self._loading_permissions = False
+
+    def _set_permissions_editable(self, editable: bool) -> None:
+        for row in range(len(self.PERMISSIONS)):
+            for col in (1, 2):
+                item = self.permissions_table.item(row, col)
+                if item is None:
+                    continue
+                if editable:
+                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                else:
+                    item.setFlags(Qt.ItemIsEnabled)
 
     def on_permission_item_changed(self, item: QTableWidgetItem) -> None:
         if self._loading_permissions:
@@ -2530,13 +2556,17 @@ class SecurityAclEditor(QWidget):
         sid = str(item.data(Qt.UserRole))
         if sid in self.principals:
             del self.principals[sid]
+        if sid in self._principal_special:
+            del self._principal_special[sid]
         self.refresh_principal_list()
         self.changed.emit()
 
     def refresh_principal_list(self, select_sid: str = "") -> None:
         self.principal_list.clear()
         target_row = -1
-        for row, sid in enumerate(sorted(self.principals.keys())):
+        all_sids = sorted(set(self.principals.keys()) | set(self._principal_special.keys()))
+        for row, sid in enumerate(all_sids):
+            self.principals.setdefault(sid, {"allow": 0, "deny": 0})
             label = self.resolve_sid_label(sid)
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, sid)
@@ -2550,6 +2580,13 @@ class SecurityAclEditor(QWidget):
 
     def _build_dacl_bytes(self) -> bytes:
         ace_payloads: list[bytes] = []
+        for ace in self._preserved_aces:
+            sid = str(ace.get("sid", ""))
+            if sid and sid not in self.principals and sid not in self._principal_special:
+                continue
+            raw_ace = ace.get("raw_ace")
+            if isinstance(raw_ace, bytes) and raw_ace:
+                ace_payloads.append(raw_ace)
         for sid in sorted(self.principals.keys()):
             data = self.principals[sid]
             sid_bytes = sid_to_bytes(sid)
@@ -2592,6 +2629,10 @@ class SecurityAclEditor(QWidget):
         self._capture_permission_checkboxes_for_sid(sid)
 
     def _capture_permission_checkboxes_for_sid(self, sid: str) -> None:
+        special_info = self._principal_special.get(sid, {})
+        if bool(special_info.get("has_special_aces", False)):
+            return
+
         allow_mask = 0
         deny_mask = 0
         allow_full_control_checked = self.permissions_table.item(self.FULL_CONTROL_INDEX, 1).checkState() == Qt.Checked
@@ -2625,7 +2666,9 @@ class SecurityAclEditor(QWidget):
         return self.principals != self._original_principals
 
     def apply_security_changes(self, reload_after_save: bool = True) -> bool:
-        self._capture_permission_checkboxes()
+        if not self.has_pending_changes():
+            return True
+
         current_item = self.principal_list.currentItem()
         selected_sid = str(current_item.data(Qt.UserRole)) if current_item else ""
 
@@ -6867,7 +6910,8 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted:
+            self.refresh_current_preserving_view(preferred_dn=obj.dn)
 
     def reset_password_for_object(self, obj: LdapObject) -> None:
         dlg = ResetPasswordDialog(obj.name, self)
@@ -7325,13 +7369,8 @@ class MainWindow(QMainWindow):
 
         allowed_actions: set[str] = set()
         for action_name, required_class in CREATABLE_CHILD_CLASS_BY_ACTION.items():
-            if required_class not in allowed_classes:
-                continue
-            try:
-                if self.ldap.can_create_child_class(dn, required_class):
-                    allowed_actions.add(action_name)
-            except Exception:
-                continue
+            if required_class in allowed_classes:
+                allowed_actions.add(action_name)
         return allowed_actions
 
     def add_creation_actions_to_menu(
@@ -7855,6 +7894,47 @@ class MainWindow(QMainWindow):
 
         if tree_item:
             self.refresh_tree_item_children(tree_item)
+
+    def refresh_current_preserving_view(self, preferred_dn: str = "") -> None:
+        selected_dns: list[str] = []
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            for idx in selection_model.selectedRows():
+                item = self.table.item(idx.row(), 0)
+                if not item:
+                    continue
+                row_obj = item.data(Qt.UserRole)
+                if isinstance(row_obj, LdapObject):
+                    selected_dns.append(row_obj.dn)
+
+        vertical_value = self.table.verticalScrollBar().value()
+        horizontal_value = self.table.horizontalScrollBar().value()
+
+        self.refresh_current()
+
+        target_dns: list[str] = []
+        preferred_dn = preferred_dn.strip()
+        if preferred_dn:
+            target_dns.append(preferred_dn)
+        target_dns.extend(dn for dn in selected_dns if dn and dn not in target_dns)
+
+        if target_dns:
+            for target_dn in target_dns:
+                for row in range(self.table.rowCount()):
+                    item = self.table.item(row, 0)
+                    if not item:
+                        continue
+                    row_obj = item.data(Qt.UserRole)
+                    if isinstance(row_obj, LdapObject) and row_obj.dn == target_dn:
+                        self.table.selectRow(row)
+                        self.table.setCurrentCell(row, 0)
+                        break
+                else:
+                    continue
+                break
+
+        self.table.verticalScrollBar().setValue(vertical_value)
+        self.table.horizontalScrollBar().setValue(horizontal_value)
 
 
 def prompt_for_update_if_available() -> None:
